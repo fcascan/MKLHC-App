@@ -53,3 +53,23 @@ The real fix would be to set JAVA_HOME to a JDK 21, but that is the author's mac
 5. RST acceptance widened to in-window (fixed). close() in SYN_RECEIVED sends RST not FIN (minor RFC deviation, left). Missing-MSS defaults to 1460 not RFC 536 (deliberate: kart link MTU 1500). No RST on an unacceptable ACK in SYN_SENT (minor interop, left).
 6. NEXT NON-HARDWARE PIECE (not a defect): the composition/integration layer is not built yet - a FrameLink-backed adapter that demuxes inbound IPv4 (proto 6 TCP, 17 UDP, 0x0806 ARP) to TcpEndpoint/UdpEndpoint/Arp/DhcpServer, plus UdpEndpoint (design section 9). Unit-testable without hardware; natural step before or alongside Phase 4 kart protocol.
 ### Hardware gate (deferred like Task 1.8): the kart gets its DHCP lease and completes a TCP handshake to app port 5201 (pairing) / 5202 (session); real RTT/loss/reorder, keepalive need, window adequacy, MSS fit.
+
+## Netstack composition contracts + follow-ups (FrameLink cold-flow, node-scoped callers, single-dispatcher, TcpEndpoint.close, wifi-ap adapter requirements)
+
+- id: netstack-composition-contracts-follow-ups-framelink-cold-flo-20261015-173012
+- type: platform_workaround
+- status: temporary
+- date: 2026-10-15
+- review_after: 2026-12-15
+
+### Netstack composition layer (NetstackNode) - contracts and follow-ups for the wifi-ap FrameLink adapter and the session orchestrator. Non-blocking; netstack composition is done (142 tests green).
+CONTRACTS the next pieces MUST honour:
+1. FrameLink.inbound MUST be a buffered cold flow (Channel.receiveAsFlow, or a SharedFlow with replay/extraBuffer + suspending/buffering overflow). A replay-less hot SharedFlow drops frames emitted before NetstackNode.start() subscribes -> silently breaks association/DHCP. Documented in FrameLink.kt and NetstackNode.start() KDoc.
+2. The orchestrator MUST await TcpEndpoint accept()/TcpConnection read()/connect() on a scope that is a CHILD of the node scope (cancelled with the node). On stop(), the TCP actors are cancelled but listeners/recv/connectResult are NOT completed, so a caller on an independent scope HANGS forever.
+3. The node is single-thread/dispatcher only: construct it on a single-threaded dispatcher (limitedParallelism(1)) and call bindUdp/start/stop and cancel the injected scope FROM that dispatcher. Off-thread teardown is damage-limited (lock-free copy-on-write UDP map + STOPPED-gated dispatch) but start()'s check-then-set state is still non-atomic.
+FOLLOW-UPS (optional, later):
+- Add a real TcpEndpoint.close() that closes listeners and aborts connections (waking blocked accept/read/connect with a cause), wired into teardown - lets the orchestrator use independent-scope callers.
+- If atomicfu is added to the build, replace the documented single-dispatcher precondition with a real lock/CAS on state + the UDP map (closes the start() check-then-set residual).
+- Not implemented (trivial to add if the spike needs them): ICMP (ping of the AP gets no reply), directed-broadcast acceptance (169.254.98.127 - only 255.255.255.255 is accepted today), IP fragmentation (DF always set, MSS 1460).
+- FrameLinkTcpLink.inbound is Channel.UNLIMITED (bounded in practice by TCP windows; video rides UDP). Revisit only if bulk data runs over TCP.
+WIFI-AP FrameLink adapter must: wrap/unwrap 802.11 + LLC/SNAP (SNAP EtherType), apply pairwise CCMP, address every send to the single associated station's MAC (incl. IP-broadcast packets as unicast 802.11, since there is no GTK), pass up both unicast-to-BSSID and broadcast-DA inbound frames, and provide NetstackConfig.ourMac = the BSSID. Call node.dhcpServer.reset() on disassociation.

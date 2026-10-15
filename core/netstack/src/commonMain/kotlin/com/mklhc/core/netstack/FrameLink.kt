@@ -58,6 +58,14 @@ interface FrameLink {
      */
     suspend fun send(etherType: Int, payload: ByteArray)
 
-    /** The network-layer payloads received from the station, in arrival order. */
+    /**
+     * The network-layer payloads received from the station, in arrival order.
+     *
+     * CONTRACT for implementations (the :core:wifi-ap link in particular): `inbound` MUST be a
+     * buffered cold flow, for example a `Channel.receiveAsFlow()`, or a `SharedFlow` with adequate
+     * `replay` / `extraBufferCapacity` and a suspending or buffering overflow policy. A replay-less
+     * hot `SharedFlow` drops link frames emitted before `NetstackNode.start()` subscribes (and any
+     * emitted before `start()` is called), which silently breaks association and DHCP.
+     */
     val inbound: Flow<LinkPayload>
 }
