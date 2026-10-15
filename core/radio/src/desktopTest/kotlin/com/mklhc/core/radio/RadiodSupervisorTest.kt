@@ -54,7 +54,7 @@ class RadiodSupervisorTest {
     private val config = RadiodConfig(
         executable = Paths.get("radiod"),
         socketPath = Paths.get("radiod.sock"),
-        token = "secret-token",
+        token = "demo-token",
     )
 
     private fun TestScope.supervisorWith(launcher: FakeLauncher) = RadiodSupervisor(
@@ -237,9 +237,9 @@ class RadiodSupervisorTest {
         val args = config.copy(extraArguments = listOf("--verbose")).commandLine()
 
         assertThat(args).isEqualTo(
-            listOf("radiod", "--socket", "radiod.sock", "--token", "secret-token", "--verbose"),
+            listOf("radiod", "--socket", "radiod.sock", "--token", "demo-token", "--verbose"),
         )
-        assertThat(config.toString()).doesNotContain("secret-token")
+        assertThat(config.toString()).doesNotContain("demo-token")
         assertThat(config.toString()).contains("token=***")
     }
 

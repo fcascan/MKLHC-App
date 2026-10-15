@@ -50,7 +50,7 @@ class IpcCodecTest {
     }
 
     @Test
-    fun `HELLO round-trips`() = roundTrip(RadioMessage.Hello(protocolVersion = 1, token = "s3cr3t-t0ken"))
+    fun `HELLO round-trips`() = roundTrip(RadioMessage.Hello(protocolVersion = 1, token = "demo-token"))
 
     @Test
     fun `OPEN_DEVICE round-trips`() = roundTrip(RadioMessage.OpenDevice(vid = 0x0bda, pid = 0xc812))
