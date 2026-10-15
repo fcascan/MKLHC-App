@@ -36,3 +36,20 @@ The real fix would be to set JAVA_HOME to a JDK 21, but that is the author's mac
 6. CryptoPrimitives.aesEcbEncryptBlock does a per-block Cipher.getInstance; expose a whole-buffer CTR + CBC-MAC (single Cipher init) before RF data rates lean on it. File: core/wifi-ap crypto.
 7. radiod: per-frame TxFrame.retryLimit is ignored (device-wide only); clean shutdown on Windows needs socket-close/SHUTDOWN, not Process.destroy (hard kill leaves the chip beaconing) - define stop ordering in the orchestrator.
 ### Also open from implementers (hardware-spike tunables, not defects): exact beacon rate set / interval / capability / DTIM / ERP; DHCP router(3)/DNS(6) options + lease time; AP WMM/EDCA + power-save buffering + class-3 deauth; Radio.cpp devourer API assumptions; devourer submodule add + native build (needs vcpkg libusb + Zadig WinUSB).
+
+## Phase 3 TCP follow-ups (flow control/persist timer, OOO buffering, TIME_WAIT reopen guard, composition layer, hardware gate)
+
+- id: phase-3-tcp-follow-ups-flow-control-persist-timer-ooo-buffer-20261015-162554
+- type: platform_workaround
+- status: temporary
+- date: 2026-10-15
+- review_after: 2026-12-15
+
+### TCP (core:netstack) follow-ups deferred from the Phase 3 reviews, for later phases / the hardware spike. None blocks Phase 3 non-hardware. Tests: 101 green.
+1. No zero-window persist/probe timer: a pure window-update ACK now re-drives the sender (fixed), but if the peer never sends one, pending data waits. Add a persist timer when real flow control lands.
+2. Advertised 16 KiB window is NOT backpressure-enforced and the recv channel is unbounded: fine for the low-rate RCD control channel, not for bulk. A real bounded buffer requires real flow control (can't just cap a trySend channel after rcvNxt advanced = corruption). Implement before any bulk TCP use.
+3. Out-of-order inbound segments are DROPPED (go-back-N; sender retransmits). If the real radio link reorders a lot, add receive buffering/selective handling. Confirm at the spike.
+4. TIME_WAIT new-SYN reopen does not yet compare the incoming SYN seq vs the old rcvNxt (RFC 9293 old-duplicate guard); reopens on any fresh same-peer SYN with a listener. Fine for single-peer kart; refine later.
+5. RST acceptance widened to in-window (fixed). close() in SYN_RECEIVED sends RST not FIN (minor RFC deviation, left). Missing-MSS defaults to 1460 not RFC 536 (deliberate: kart link MTU 1500). No RST on an unacceptable ACK in SYN_SENT (minor interop, left).
+6. NEXT NON-HARDWARE PIECE (not a defect): the composition/integration layer is not built yet - a FrameLink-backed adapter that demuxes inbound IPv4 (proto 6 TCP, 17 UDP, 0x0806 ARP) to TcpEndpoint/UdpEndpoint/Arp/DhcpServer, plus UdpEndpoint (design section 9). Unit-testable without hardware; natural step before or alongside Phase 4 kart protocol.
+### Hardware gate (deferred like Task 1.8): the kart gets its DHCP lease and completes a TCP handshake to app port 5201 (pairing) / 5202 (session); real RTT/loss/reorder, keepalive need, window adequacy, MSS fit.
