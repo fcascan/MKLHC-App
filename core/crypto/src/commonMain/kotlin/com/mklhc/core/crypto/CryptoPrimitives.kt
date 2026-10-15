@@ -1,16 +1,17 @@
-package com.mklhc.core.wifi_ap.crypto
+package com.mklhc.core.crypto
 
 /**
- * Platform-agnostic surface for the symmetric-crypto building blocks the Wi-Fi AP stack relies on.
+ * Platform-agnostic surface for the symmetric-crypto building blocks shared across the project: the
+ * Wi-Fi AP CCMP stack and the kart-protocol RCD handshake hash and pairing-key derivation both build
+ * on it.
  *
- * commonMain code (for example [Ccmp]) depends only on this abstraction so that no platform crypto
- * API leaks into shared logic. The concrete implementation lives in the `jvmShared` source set and
- * is backed by the JVM Cryptography Architecture (JCA), which is available on both Android and the
- * desktop JVM.
+ * commonMain code depends only on this abstraction so that no platform crypto API leaks into shared
+ * logic. The concrete implementation lives in the `jvmShared` source set and is backed by the JVM
+ * Cryptography Architecture (JCA), which is available on both Android and the desktop JVM.
  *
  * Note on CCM: stock JCA exposes no "AES/CCM" transformation, so AES-CCM (used by CCMP) is built by
- * hand in [Ccmp] on top of [aesEcbEncryptBlock] (CBC-MAC for the MIC and CTR for encryption). This
- * interface therefore deliberately exposes the single-block ECB primitive rather than a CCM cipher.
+ * hand on top of [aesEcbEncryptBlock] (CBC-MAC for the MIC and CTR for encryption). This interface
+ * therefore deliberately exposes the single-block ECB primitive rather than a CCM cipher.
  */
 expect class CryptoPrimitives() {
 
@@ -48,4 +49,13 @@ expect class CryptoPrimitives() {
 
     /** Computes the SHA-512 digest of [data], returning 64 bytes. */
     fun sha512(data: ByteArray): ByteArray
+
+    /**
+     * Returns [n] cryptographically secure random octets, drawn from the platform's secure RNG
+     * (java.security.SecureRandom on the JVM). Suitable for key material, nonces and handshake
+     * challenges; do not use a general-purpose [kotlin.random.Random] where this is called for.
+     *
+     * @param n the number of octets to return; must be non-negative.
+     */
+    fun secureRandomBytes(n: Int): ByteArray
 }

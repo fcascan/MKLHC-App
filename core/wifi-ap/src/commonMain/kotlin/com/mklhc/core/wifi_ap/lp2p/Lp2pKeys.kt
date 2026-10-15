@@ -1,7 +1,7 @@
 // Ported from OpenKart https://github.com/OpenKart-SDK, openkartd/lp2p.py (BSD-3-Clause). Copyright 2021 Sam Edwards.
 package com.mklhc.core.wifi_ap.lp2p
 
-import com.mklhc.core.wifi_ap.crypto.CryptoPrimitives
+import com.mklhc.core.crypto.CryptoPrimitives
 
 /**
  * LP2P key derivation: turns a 16-byte nonce and a secret into two 128-bit keys.

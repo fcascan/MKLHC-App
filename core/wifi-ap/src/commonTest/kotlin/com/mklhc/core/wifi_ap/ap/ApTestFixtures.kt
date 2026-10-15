@@ -1,6 +1,6 @@
 package com.mklhc.core.wifi_ap.ap
 
-import com.mklhc.core.wifi_ap.crypto.CryptoPrimitives
+import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.wifi_ap.lp2p.Lp2pBeacon
 import com.mklhc.core.wifi_ap.lp2p.Lp2pNetwork
 import com.mklhc.core.wifi_ap.mac.MacAddress

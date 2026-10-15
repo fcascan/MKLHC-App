@@ -1,7 +1,7 @@
 // Ported from OpenKart https://github.com/OpenKart-SDK, openkartd/lp2p.py (BSD-3-Clause). Copyright 2021 Sam Edwards.
 package com.mklhc.core.wifi_ap.lp2p
 
-import com.mklhc.core.wifi_ap.crypto.CryptoPrimitives
+import com.mklhc.core.crypto.CryptoPrimitives
 
 /**
  * The result of [Lp2pBeacon.encryptNetwork]: what the access point needs to bring the LP2P

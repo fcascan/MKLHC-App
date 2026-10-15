@@ -6,7 +6,7 @@ import com.mklhc.core.wifi_ap.ap.ApTestFixtures.STATION_A
 import com.mklhc.core.wifi_ap.ap.ApTestFixtures.STATION_B
 import com.mklhc.core.wifi_ap.crypto.Ccmp
 import com.mklhc.core.wifi_ap.crypto.CcmpException
-import com.mklhc.core.wifi_ap.crypto.CryptoPrimitives
+import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.wifi_ap.mac.BeaconBuilder
 import com.mklhc.core.wifi_ap.mac.FrameControl
 import com.mklhc.core.wifi_ap.mac.Ieee80211

@@ -1,0 +1,201 @@
+{
+  "source": "OpenKart openkartd/rcd.py (BSD-3-Clause, Copyright 2021 Sam Edwards)",
+  "generator": "tools/gen_rcd_vectors.py",
+  "constants": {
+    "handshake_service_id": 1,
+    "header_size": 16,
+    "max_data_size": 4096,
+    "error_codes": {
+      "missized_payload": "708e8",
+      "bad_request": "710e8",
+      "handshake_version_mismatch": "800e8",
+      "handshake_sequence": "810e8",
+      "handshake_bad_versions": "820e8",
+      "handshake_hash": "830e8",
+      "handshake_unrecognized_device": "850e8"
+    }
+  },
+  "msg_encode": [
+    {
+      "name": "request, empty data",
+      "service": 1,
+      "command": 1,
+      "status": 0,
+      "is_response": false,
+      "data": "",
+      "encoded": "00010001000000000000000000000000"
+    },
+    {
+      "name": "request, short data",
+      "service": 1,
+      "command": 2,
+      "status": 0,
+      "is_response": false,
+      "data": "deadbeef",
+      "encoded": "00010002000000040000000000000000deadbeef"
+    },
+    {
+      "name": "response, status ok",
+      "service": 1,
+      "command": 3,
+      "status": 0,
+      "is_response": true,
+      "data": "000102030405060708090a0b0c0d0e0f",
+      "encoded": "00010003000000100000000001000000000102030405060708090a0b0c0d0e0f"
+    },
+    {
+      "name": "response, error status (BadRequest)",
+      "service": 4660,
+      "command": 7,
+      "status": 463080,
+      "is_response": true,
+      "data": "",
+      "encoded": "1234000700000000000710e801000000"
+    },
+    {
+      "name": "response, large status (HandshakeUnrecognizedDevice)",
+      "service": 43981,
+      "command": 4,
+      "status": 545000,
+      "is_response": true,
+      "data": "aaaaaaaaaa",
+      "encoded": "abcd000400000005000850e801000000aaaaaaaaaa"
+    }
+  ],
+  "msg_size": [
+    {
+      "name": "shorter than header -> header size",
+      "buffer": "00010002",
+      "size": 16
+    },
+    {
+      "name": "header only, declares 4 data bytes -> 20",
+      "buffer": "00010001000000040000000000000000",
+      "size": 20
+    },
+    {
+      "name": "complete 20-byte message -> 20",
+      "buffer": "0001000100000004000000000000000001020304",
+      "size": 20
+    }
+  ],
+  "msg_decode": [
+    {
+      "name": "flags 0x03 -> is_response true, spare bits ignored",
+      "buffer": "0001000500000002000708e8030000001122",
+      "service": 1,
+      "command": 5,
+      "status": 461032,
+      "is_response": true,
+      "data": "1122"
+    }
+  ],
+  "pairing_keys": [
+    {
+      "name": "named device",
+      "master_key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "device_ident": "202122232425262728292a2b2c2d2e2f",
+      "device_name": "Wheel-1",
+      "pairing_id": "855b27ba5e012214e83e17e757e546ec61a77bd11318cf89b4412aa90ab1bbf1",
+      "secret_key": "4941d879c15925af0b0183c3318cd9ce5931d493740c0b39acd022a58d836e075987c857866444f602c8af84273796f72adb200ff48497aefcff40ea7f57daac"
+    },
+    {
+      "name": "empty name",
+      "master_key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "device_ident": "55555555555555555555555555555555",
+      "device_name": "",
+      "pairing_id": "60b01fedc35aae3640d0faf15beb0306154a52114d5e4c84d88c9f913b346063",
+      "secret_key": "0ddb03b77e10a82d09cad6456ad94333264d8cc38edeface5483e3810d2ae614223cb9e7ca3b7d94d3481960fb8a377e663a38538f32ea332e913decb89e6d43"
+    },
+    {
+      "name": "other device",
+      "master_key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "device_ident": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "device_name": "Pad_A",
+      "pairing_id": "8ead2f5591a84558b095d3727ae0d5987674886620d66c2b0e4942d1d06288db",
+      "secret_key": "3cb1cec7b3e7ce7e6fb4151614c31af4e7ecf1ebea13f53eb42d2874c43afe545492b8335fb691e4cf8203f7adef229c71916d27f3a078b4deafe50f9d280acd"
+    }
+  ],
+  "handshake": {
+    "server_info": {
+      "name": "KartHub",
+      "ident": "101112131415161718191a1b1c1d1e1f",
+      "master_key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "versions": [
+        2,
+        1
+      ]
+    },
+    "device": {
+      "name": "Wheel-1",
+      "ident": "202122232425262728292a2b2c2d2e2f"
+    },
+    "pairing_id": "855b27ba5e012214e83e17e757e546ec61a77bd11318cf89b4412aa90ab1bbf1",
+    "secret_key": "4941d879c15925af0b0183c3318cd9ce5931d493740c0b39acd022a58d836e075987c857866444f602c8af84273796f72adb200ff48497aefcff40ea7f57daac",
+    "selected_version": 2,
+    "begin_challenge": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "steps": [
+      {
+        "command": 1,
+        "request": "01000000000000000000000000000000576865656c2d31000000000000000000202122232425262728292a2b2c2d2e2f0000000000000000000000000000000000000000000000000000000000000000",
+        "response": "010000000000000000000000000000004b617274487562000000000000000000101112131415161718191a1b1c1d1e1fc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+      },
+      {
+        "command": 2,
+        "request": "855b27ba5e012214e83e17e757e546ec61a77bd11318cf89b4412aa90ab1bbf1020201",
+        "response": "855b27ba5e012214e83e17e757e546ec61a77bd11318cf89b4412aa90ab1bbf102000000000000000000000000000000"
+      },
+      {
+        "command": 4,
+        "request": "5628a22aade5108f58b83562b16b9879541100c76fccfc72992450922dd42a53",
+        "response": "8936a9969539337230a06dd815ad3579819ede703970eb8e350007599572c6cb",
+        "finalize_check_input": "5628a22aade5108f58b83562b16b9879541100c76fccfc72992450922dd42a53",
+        "finalize_digest": "8936a9969539337230a06dd815ad3579819ede703970eb8e350007599572c6cb"
+      }
+    ]
+  },
+  "pairing_handshake": {
+    "server_info": {
+      "name": "KartHub",
+      "ident": "101112131415161718191a1b1c1d1e1f",
+      "master_key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "versions": [
+        2,
+        1
+      ]
+    },
+    "device": {
+      "name": "Pad_A",
+      "ident": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "offered_pairing_id": "0000000000000000000000000000000000000000000000000000000000000000",
+    "pairing_id": "8ead2f5591a84558b095d3727ae0d5987674886620d66c2b0e4942d1d06288db",
+    "secret_key": "3cb1cec7b3e7ce7e6fb4151614c31af4e7ecf1ebea13f53eb42d2874c43afe545492b8335fb691e4cf8203f7adef229c71916d27f3a078b4deafe50f9d280acd",
+    "selected_version": 2,
+    "begin_challenge": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+    "steps": [
+      {
+        "command": 1,
+        "request": "010000000000000000000000000000005061645f410000000000000000000000eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee0000000000000000000000000000000000000000000000000000000000000000",
+        "response": "010000000000000000000000000000004b617274487562000000000000000000101112131415161718191a1b1c1d1e1fc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+      },
+      {
+        "command": 2,
+        "request": "0000000000000000000000000000000000000000000000000000000000000000020201",
+        "response": "8ead2f5591a84558b095d3727ae0d5987674886620d66c2b0e4942d1d06288db02000000000000000000000000000000"
+      },
+      {
+        "command": 3,
+        "request": "0000000000000000000000000000000000000000000000000000000000000000",
+        "response": "3cb1cec7b3e7ce7e6fb4151614c31af4e7ecf1ebea13f53eb42d2874c43afe545492b8335fb691e4cf8203f7adef229c71916d27f3a078b4deafe50f9d280acd"
+      },
+      {
+        "command": 4,
+        "request": "6ab639a34200741e36a0ef09b52193e28d9f34539e669e742f7a282b1c4b706e",
+        "response": "0740d40c48c125a5b3d7ed0538ee10053af1414059c6c81d92ad7f93dd1ac235",
+        "finalize_check_input": "6ab639a34200741e36a0ef09b52193e28d9f34539e669e742f7a282b1c4b706e",
+        "finalize_digest": "0740d40c48c125a5b3d7ed0538ee10053af1414059c6c81d92ad7f93dd1ac235"
+      }
+    ]
+  }
+}

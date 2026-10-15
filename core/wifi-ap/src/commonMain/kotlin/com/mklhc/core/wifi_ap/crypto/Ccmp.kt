@@ -1,5 +1,7 @@
 package com.mklhc.core.wifi_ap.crypto
 
+import com.mklhc.core.crypto.CryptoPrimitives
+
 /** Signals that a received CCMP MPDU could not be accepted (MIC failure or PN replay). */
 class CcmpException(message: String) : Exception(message)
 

@@ -1,9 +1,9 @@
 // Design reference: devourer ap_responder.cpp; no code copied.
 package com.mklhc.core.wifi_ap.ap
 
+import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.wifi_ap.crypto.Ccmp
 import com.mklhc.core.wifi_ap.crypto.CcmpException
-import com.mklhc.core.wifi_ap.crypto.CryptoPrimitives
 import com.mklhc.core.wifi_ap.mac.BeaconBuilder
 import com.mklhc.core.wifi_ap.mac.Ieee80211
 import com.mklhc.core.wifi_ap.mac.Ieee80211Frame

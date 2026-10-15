@@ -1,0 +1,426 @@
+{
+  "source": "OpenKart openkartd/fuji.py (BSD-3-Clause, Copyright 2021 Sam Edwards); read_application_data adapted from mk-live patches/openkartd/fuji.py (MIT)",
+  "generator": "tools/gen_fuji_vectors.py",
+  "constants": {
+    "control_service_id": 256,
+    "pairing_service_id": 258,
+    "drive_port": 5102,
+    "control_port": 5103,
+    "pairing_port": 5106,
+    "event_port": 5107,
+    "application_id": "YVCOQ00000000XFB"
+  },
+  "padding": [
+    {
+      "name": "pad short to 0x10",
+      "input": "0005",
+      "length": 16,
+      "padded": "00050000000000000000000000000000"
+    },
+    {
+      "name": "already full length",
+      "input": "000102030405060708090a0b0c0d0e0f",
+      "length": 16,
+      "padded": "000102030405060708090a0b0c0d0e0f"
+    },
+    {
+      "name": "empty to 0x20",
+      "input": "",
+      "length": 32,
+      "padded": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "one byte to 0x10",
+      "input": "01",
+      "length": 16,
+      "padded": "01000000000000000000000000000000"
+    }
+  ],
+  "system_info": [
+    {
+      "name": "typical, NUL terminated",
+      "input": "010203043031323334353637383961626364656630313233343536373839616263646566303132333435363700ffff",
+      "boot_version": [
+        1,
+        2
+      ],
+      "system_version": [
+        3,
+        4
+      ],
+      "sha1": "0123456789abcdef0123456789abcdef01234567",
+      "sha1_codepoints": [
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        97,
+        98,
+        99,
+        100,
+        101,
+        102,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        97,
+        98,
+        99,
+        100,
+        101,
+        102,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55
+      ]
+    },
+    {
+      "name": "no terminator",
+      "input": "00ff80076465616462656566",
+      "boot_version": [
+        0,
+        255
+      ],
+      "system_version": [
+        128,
+        7
+      ],
+      "sha1": "deadbeef",
+      "sha1_codepoints": [
+        100,
+        101,
+        97,
+        100,
+        98,
+        101,
+        101,
+        102
+      ]
+    },
+    {
+      "name": "empty sha",
+      "input": "09080706",
+      "boot_version": [
+        9,
+        8
+      ],
+      "system_version": [
+        7,
+        6
+      ],
+      "sha1": "",
+      "sha1_codepoints": []
+    },
+    {
+      "name": "immediately NUL",
+      "input": "090807060041",
+      "boot_version": [
+        9,
+        8
+      ],
+      "system_version": [
+        7,
+        6
+      ],
+      "sha1": "",
+      "sha1_codepoints": []
+    },
+    {
+      "name": "latin1 high bytes",
+      "input": "010102026162e9ff007a7a",
+      "boot_version": [
+        1,
+        1
+      ],
+      "system_version": [
+        2,
+        2
+      ],
+      "sha1": null,
+      "sha1_codepoints": [
+        97,
+        98,
+        233,
+        255
+      ]
+    }
+  ],
+  "product_code": [
+    {
+      "name": "character 1, serial",
+      "input": "03000100075345523132333435363700aaaa",
+      "unk1": 3,
+      "character": 1,
+      "unk2": 7,
+      "serial": "SER1234567"
+    },
+    {
+      "name": "character 2, serial",
+      "input": "000002000041424344454600",
+      "unk1": 0,
+      "character": 2,
+      "unk2": 0,
+      "serial": "ABCDEF"
+    },
+    {
+      "name": "big-endian trap: 0x0102 / 0x0304",
+      "input": "02010403ff58595a",
+      "unk1": 258,
+      "character": 772,
+      "unk2": 255,
+      "serial": "XYZ"
+    },
+    {
+      "name": "empty serial",
+      "input": "0100010001",
+      "unk1": 1,
+      "character": 1,
+      "unk2": 1,
+      "serial": ""
+    },
+    {
+      "name": "immediately NUL serial",
+      "input": "0100050001006a756e6b",
+      "unk1": 1,
+      "character": 5,
+      "unk2": 1,
+      "serial": ""
+    }
+  ],
+  "get_system_info": {
+    "service": 256,
+    "command": 1,
+    "request": "",
+    "response": "0102030461626300",
+    "boot_version": [
+      1,
+      2
+    ],
+    "system_version": [
+      3,
+      4
+    ],
+    "sha1": "abc"
+  },
+  "set_param": [
+    {
+      "service": 256,
+      "command": 2,
+      "request": "746573745f706172616d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000500000000000000000000000000000102030405",
+      "name": "short value",
+      "param": "test_param",
+      "value": "0102030405"
+    },
+    {
+      "service": 256,
+      "command": 2,
+      "request": "656d70747900000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "name": "empty value",
+      "param": "empty",
+      "value": ""
+    },
+    {
+      "service": 256,
+      "command": 2,
+      "request": "6269675f706172616d00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000123000000000000000000000000000000070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7ee",
+      "name": "two-byte length (0x0123 octets)",
+      "param": "big_param",
+      "value": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7ee"
+    },
+    {
+      "service": 256,
+      "command": 2,
+      "request": "6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e6e0000010000000000000000000000000000aa",
+      "name": "longest name (0x7f octets)",
+      "param": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+      "value": "aa"
+    }
+  ],
+  "connection_info": [
+    {
+      "service": 256,
+      "command": 2,
+      "request": "636f6e6e656374696f6e5f696e666f0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000100fc13a81398130078e76800000000",
+      "name": "announced ports",
+      "telemetry_port": 5116,
+      "video_control_port": 5032,
+      "video_stream_port": 5016,
+      "unk": 1,
+      "timestamp": "1760000000"
+    },
+    {
+      "service": 256,
+      "command": 2,
+      "request": "636f6e6e656374696f6e5f696e666f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000003412cdabff008877665544332211",
+      "name": "unk 0, 64-bit timestamp, high port bytes",
+      "telemetry_port": 4660,
+      "video_control_port": 43981,
+      "video_stream_port": 255,
+      "unk": 0,
+      "timestamp": "1234605616436508552"
+    },
+    {
+      "service": 256,
+      "command": 2,
+      "request": "636f6e6e656374696f6e5f696e666f00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000001000100020003000000000000000000",
+      "name": "all-zero timestamp",
+      "telemetry_port": 1,
+      "video_control_port": 2,
+      "video_stream_port": 3,
+      "unk": 1,
+      "timestamp": "0"
+    }
+  ],
+  "get_param": [
+    {
+      "service": 256,
+      "command": 3,
+      "request": "70726f647563745f636f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "name": "product_code, exact size",
+      "param": "product_code",
+      "response": "000a000000000000000000000000000001000100015345523900",
+      "result": "01000100015345523900"
+    },
+    {
+      "service": 256,
+      "command": 3,
+      "request": "70726f647563745f636f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "name": "declared size shorter than the data",
+      "param": "product_code",
+      "response": "000300000000000000000000000000006162636465666768",
+      "result": "616263"
+    },
+    {
+      "service": 256,
+      "command": 3,
+      "request": "6269670000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "name": "two-byte size (0x0102)",
+      "param": "big",
+      "response": "01020000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff07",
+      "result": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff07"
+    },
+    {
+      "service": 256,
+      "command": 3,
+      "request": "73686f7274000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "name": "declared size longer than the data",
+      "param": "short",
+      "response": "0020000000000000000000000000000061626364",
+      "result": "61626364"
+    },
+    {
+      "service": 256,
+      "command": 3,
+      "request": "656d707479000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "name": "empty value",
+      "param": "empty",
+      "response": "00000000000000000000000000000000",
+      "result": ""
+    }
+  ],
+  "product_code_flow": {
+    "service": 256,
+    "command": 3,
+    "request": "70726f647563745f636f64650000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "response": "0010000000000000000000000000000003000100075345523132333435363700",
+    "unk1": 3,
+    "character": 1,
+    "unk2": 7,
+    "serial": "SER1234567"
+  },
+  "set_state": [
+    {
+      "service": 256,
+      "command": 4,
+      "request": "01000000000000000000000000000000",
+      "state": 1
+    },
+    {
+      "service": 256,
+      "command": 4,
+      "request": "00000000000000000000000000000000",
+      "state": 0
+    },
+    {
+      "service": 256,
+      "command": 4,
+      "request": "ff000000000000000000000000000000",
+      "state": 255
+    }
+  ],
+  "shutdown": {
+    "service": 256,
+    "command": 9,
+    "request": ""
+  },
+  "read_application_data": [
+    {
+      "name": "companion application id, default size",
+      "service": 256,
+      "command": 18,
+      "application_id": "YVCOQ00000000XFB",
+      "max_size": 2048,
+      "request": "5956434f51303030303030303058464200000800000000000000000000000000"
+    },
+    {
+      "name": "companion application id, 0x1000",
+      "service": 256,
+      "command": 18,
+      "application_id": "YVCOQ00000000XFB",
+      "max_size": 4096,
+      "request": "5956434f51303030303030303058464200001000000000000000000000000000"
+    },
+    {
+      "name": "short id is zero padded",
+      "service": 256,
+      "command": 18,
+      "application_id": "ABC",
+      "max_size": 258,
+      "request": "4142430000000000000000000000000000000102000000000000000000000000"
+    }
+  ],
+  "set_group_info": [
+    {
+      "service": 258,
+      "command": 1,
+      "request": "4b6172744e65742d303100000000000000000000000000000000000000000000101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "name": "typical",
+      "ssid": "KartNet-01",
+      "psk": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+    },
+    {
+      "service": 258,
+      "command": 1,
+      "request": "7373737373737373737373737373737373737373737373737373737373737300a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+      "name": "ssid of 31 octets (longest accepted)",
+      "ssid": "sssssssssssssssssssssssssssssss",
+      "psk": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+    },
+    {
+      "service": 258,
+      "command": 1,
+      "request": "0000000000000000000000000000000000000000000000000000000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "name": "empty ssid",
+      "ssid": "",
+      "psk": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    }
+  ]
+}

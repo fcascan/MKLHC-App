@@ -1,5 +1,6 @@
 package com.mklhc.core.wifi_ap.crypto
 
+import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.wifi_ap.lp2p.MiniJson
 import com.mklhc.core.wifi_ap.lp2p.readTestResource
 import kotlin.test.Test

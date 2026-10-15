@@ -1,5 +1,6 @@
 package com.mklhc.core.wifi_ap.crypto
 
+import com.mklhc.core.crypto.CryptoPrimitives
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith

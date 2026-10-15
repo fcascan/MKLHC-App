@@ -1,6 +1,7 @@
 // Build file for :core:wifi-ap: Kotlin Multiplatform library (desktop + Android).
-// Phase 1: hosts the CCMP crypto, which relies on an expect/actual CryptoPrimitives class, and the
-// LP2P beacon/key derivation, which bundles the pre-encrypted nonce table as a classpath resource.
+// Phase 1: hosts the CCMP crypto, which relies on the shared CryptoPrimitives (now in :core:crypto),
+// and the LP2P beacon/key derivation, which bundles the pre-encrypted nonce table as a classpath
+// resource.
 import com.android.build.api.dsl.LibraryExtension
 
 plugins {
@@ -8,10 +9,12 @@ plugins {
 }
 
 kotlin {
-    // CryptoPrimitives is an expect/actual class; opt in to the (still Beta) multiplatform classes
-    // feature so the build does not warn on every compilation.
-    compilerOptions {
-        freeCompilerArgs.add("-Xexpect-actual-classes")
+    sourceSets {
+        commonMain.dependencies {
+            // CryptoPrimitives is exposed through the public constructors of Ccmp, Lp2pKeys,
+            // Lp2pBeacon and ApStateMachine, so it must stay on the consumer's compile classpath.
+            api(project(":core:crypto"))
+        }
     }
 }
 

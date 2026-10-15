@@ -1,6 +1,7 @@
-package com.mklhc.core.wifi_ap.crypto
+package com.mklhc.core.crypto
 
 import java.security.MessageDigest
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.GCMParameterSpec
@@ -11,10 +12,14 @@ import javax.crypto.spec.SecretKeySpec
  * JCA-backed implementation of [CryptoPrimitives], shared by the Android and desktop JVM targets
  * through the `jvmShared` source set.
  *
- * All routines are stateless, so a single instance is safe to reuse. Each call creates its own
- * [Cipher]/[Mac]/[MessageDigest] instance because those JCA types are not thread-safe.
+ * A single instance is safe to reuse and to share across threads: the hash, HMAC and cipher routines
+ * each create their own [Cipher]/[Mac]/[MessageDigest] because those JCA types are not thread-safe,
+ * and the one piece of retained state -- the [SecureRandom] behind [secureRandomBytes] -- is itself
+ * thread-safe (kept rather than re-created so it is not reseeded on every call).
  */
 actual class CryptoPrimitives actual constructor() {
+
+    private val secureRandom = SecureRandom()
 
     actual fun aesEcbEncryptBlock(key: ByteArray, block: ByteArray): ByteArray {
         require(block.size == AES_BLOCK_BYTES) { "AES ECB block must be $AES_BLOCK_BYTES bytes" }
@@ -54,6 +59,11 @@ actual class CryptoPrimitives actual constructor() {
     actual fun sha256(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
 
     actual fun sha512(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-512").digest(data)
+
+    actual fun secureRandomBytes(n: Int): ByteArray {
+        require(n >= 0) { "n must be non-negative: n=$n" }
+        return ByteArray(n).also { secureRandom.nextBytes(it) }
+    }
 
     private fun hmac(algorithm: String, key: ByteArray, msg: ByteArray): ByteArray {
         val mac = Mac.getInstance(algorithm)

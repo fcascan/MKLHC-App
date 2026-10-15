@@ -73,3 +73,20 @@ FOLLOW-UPS (optional, later):
 - Not implemented (trivial to add if the spike needs them): ICMP (ping of the AP gets no reply), directed-broadcast acceptance (169.254.98.127 - only 255.255.255.255 is accepted today), IP fragmentation (DF always set, MSS 1460).
 - FrameLinkTcpLink.inbound is Channel.UNLIMITED (bounded in practice by TCP windows; video rides UDP). Revisit only if bulk data runs over TCP.
 WIFI-AP FrameLink adapter must: wrap/unwrap 802.11 + LLC/SNAP (SNAP EtherType), apply pairwise CCMP, address every send to the single associated station's MAC (incl. IP-broadcast packets as unicast 802.11, since there is no GTK), pass up both unicast-to-BSSID and broadcast-DA inbound frames, and provide NetstackConfig.ourMac = the BSSID. Call node.dhcpServer.reset() on disassociation.
+
+## Phase 4 kart-protocol done; deferred items (IMU/video/LVNI spike unknowns, release notices) + next piece: session orchestrator
+
+- id: phase-4-kart-protocol-done-deferred-items-imu-video-lvni-spi-20261015-201235
+- type: platform_workaround
+- status: temporary
+- date: 2026-10-15
+- review_after: 2026-12-15
+
+### Phase 4 (kart-protocol + core:crypto) done: 236 kart-protocol + 10 crypto tests green, wifi-ap still 97. Follow-ups / deferred items, none blocking.
+HARDWARE-SPIKE / REA confirmation items (documented in code KDocs, NOT bugs - no reference impl exists):
+- IMU (telemetry type 2): offset base (payload-after-type vs datagram-start), endianness (assumed LE), NNN vs NNN+1 sample count (ImuDecoder.SAMPLE_COUNT_BIAS=0), flag bit positions IGA??NNN, accel/gyro scales, the +9.81 gravity-on-Z sign, integrator units, quaternion axis order. Telemetry type 3 unknown.
+- Video: FRAM offsets 13 vs 43, L2 block, 8-byte trailer, FRAM_SIZE_OVERHEAD=34, 2 MiB cap. LVNI frame-id source and flags semantics are an OPEN UNKNOWN (Lvni.encode lays out bytes; the caller chooses ids). LSP control (PI) and keyframe-request semantics unknown. SPS/PPS caching is the later video-decoder task.
+- Fuji event channel (0x103): service id and whether the kart wants non-empty replies is unconfirmed (default empty). connection_info timestamp is caller-supplied (unix seconds). readApplicationData layout matches mk-live's source (verified in-session) but not cross-run.
+RELEASE items:
+- THIRD_PARTY_NOTICES.md lists OpenKart + mk-live but should add the full BSD-3/MIT license texts (and note the community-wiki specs) before a public release (Phase 8).
+NEXT NON-HARDWARE PIECE - the session orchestrator: :core:data KartSessionRepository + DataStore PairingStore that wire radio -> wifi-ap AP -> netstack NetstackNode -> kart-protocol (RCD server on 5201/5202, FujiControlClient on 5103, FujiPairingClient on 5106, FujiEventChannel on 5107, teleop UDP 5102, telemetry/video UDP) and drive the LinkState machine (pairing + session sequences). Must honour: inject a secure challenge (now default via crypto.secureRandomBytes), run on a single-threaded dispatcher, await TCP accept/read/connect on a node-scoped child, supply a buffered-cold-flow FrameLink (wifi-ap adapter), set connection_info ports (telemetry 5116/control 5032/video 5016 per spec), call dhcpServer.reset() on disassociation. The wifi-ap FrameLink adapter (802.11+LLC/SNAP + CCMP + single-station MAC) and feature UIs (cockpit/pairing/link, MVVM against a fake repository) are the other non-hardware tracks. Task 1.8 GO/NO-GO still needs the adapter + kart.
