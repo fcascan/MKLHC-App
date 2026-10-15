@@ -1,0 +1,91 @@
+[versions]
+# Language and build tooling
+kotlin = "2.2.20"
+agp = "8.13.0"
+composeMultiplatform = "1.9.3"
+foojay = "1.0.0"
+
+# Kotlin libraries
+coroutines = "1.10.2"
+kermit = "2.2.0"
+koin = "4.1.1"
+koinCompose = "4.1.1"
+datastore = "1.1.7"
+zxingCore = "3.5.4"
+
+# AndroidX / JetBrains androidx ports (KMP)
+androidxActivityCompose = "1.11.0"
+jetbrainsLifecycleViewmodelCompose = "2.9.4"
+jetbrainsNavigationCompose = "2.9.2"
+
+# Testing
+junitBom = "5.14.4"
+turbine = "1.2.1"
+assertk = "0.28.1"
+
+# Platform configuration (read by the build-logic convention plugins)
+androidMinSdk = "26"
+androidCompileSdk = "36"
+androidTargetSdk = "35"
+jvmTarget = "21"
+appVersionName = "1.0.0"
+appVersionCode = "1"
+
+[libraries]
+# Kotlin
+kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+
+# Coroutines
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
+kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
+
+# Logging
+kermit = { module = "co.touchlab:kermit", version.ref = "kermit" }
+
+# Dependency injection
+koin-core = { module = "io.insert-koin:koin-core", version.ref = "koin" }
+koin-android = { module = "io.insert-koin:koin-android", version.ref = "koin" }
+koin-compose = { module = "io.insert-koin:koin-compose", version.ref = "koinCompose" }
+koin-compose-viewmodel = { module = "io.insert-koin:koin-compose-viewmodel", version.ref = "koinCompose" }
+
+# Storage
+androidx-datastore-preferences-core = { module = "androidx.datastore:datastore-preferences-core", version.ref = "datastore" }
+
+# QR codes
+zxing-core = { module = "com.google.zxing:core", version.ref = "zxingCore" }
+
+# AndroidX / JetBrains androidx ports
+androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidxActivityCompose" }
+jetbrains-lifecycle-viewmodel-compose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "jetbrainsLifecycleViewmodelCompose" }
+jetbrains-lifecycle-runtime-compose = { module = "org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose", version.ref = "jetbrainsLifecycleViewmodelCompose" }
+jetbrains-navigation-compose = { module = "org.jetbrains.androidx.navigation:navigation-compose", version.ref = "jetbrainsNavigationCompose" }
+
+# Testing (junit-jupiter and junit-platform-launcher take their version from the BOM)
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junitBom" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+turbine = { module = "app.cash.turbine:turbine", version.ref = "turbine" }
+assertk = { module = "com.willowtreeapps.assertk:assertk", version.ref = "assertk" }
+
+# Gradle plugin artifacts that build-logic needs on its classpath
+kotlin-gradlePlugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+android-gradlePlugin = { module = "com.android.tools.build:gradle", version.ref = "agp" }
+compose-gradlePlugin = { module = "org.jetbrains.compose:compose-gradle-plugin", version.ref = "composeMultiplatform" }
+compose-compiler-gradlePlugin = { module = "org.jetbrains.kotlin:compose-compiler-gradle-plugin", version.ref = "kotlin" }
+
+[bundles]
+# Common test dependencies shared by every KMP module (kotlin-test is added separately)
+testing-common = ["kotlinx-coroutines-test", "turbine", "assertk"]
+# Koin integration for Compose Multiplatform screens
+koin-compose = ["koin-compose", "koin-compose-viewmodel"]
+
+[plugins]
+kotlin-multiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+compose = { id = "org.jetbrains.compose", version.ref = "composeMultiplatform" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+foojay-resolver = { id = "org.gradle.toolchains.foojay-resolver-convention", version.ref = "foojay" }
