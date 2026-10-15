@@ -1,0 +1,171 @@
+{
+  "source": "OpenKart openkartd/lp2p.py and openkartd/lp2p_nonces.py (BSD-3-Clause, Copyright 2021 Sam Edwards)",
+  "generator": "tools/gen_lp2p_vectors.py",
+  "constants": {
+    "local_communication_id": "0100ed100ba3a000",
+    "well_known": "WellKnownStr",
+    "revision": 1,
+    "seq_period": 1800
+  },
+  "derive_keys": [
+    {
+      "name": "psk path, nonce index 0x1234",
+      "nonce": "57656c6c4b6e6f776e53747200011234",
+      "psk": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "ka": "e09122b65aef028eb8719edea35841b7",
+      "kc": "65a9e04f8e2522a623520b7ecccdb61a"
+    },
+    {
+      "name": "local-communication-id path (little-endian), nonce index 0x1234",
+      "nonce": "57656c6c4b6e6f776e53747200011234",
+      "psk": "00a0a30b10ed0001",
+      "ka": "5fba24165080caad2ad37174bbf08ca2",
+      "kc": "9053dc7ecbcffa4d2143a6bba0fcfba2"
+    },
+    {
+      "name": "all-zero nonce, all-zero psk",
+      "nonce": "00000000000000000000000000000000",
+      "psk": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ka": "c0fb827b12352189c62a21aba94221a2",
+      "kc": "a291b7e5f74ecc55d7eed0187a34bef4"
+    }
+  ],
+  "encrypt_network": [
+    {
+      "name": "sequential nonce (temporary=false)",
+      "psk": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "temporary": false,
+      "time": 1760000000.75,
+      "randrange_draws": [
+        {
+          "bound": 16,
+          "value": 9
+        }
+      ],
+      "plain_nonce": "57656c6c4b6e6f776e5374720001b71a",
+      "encrypted_nonce": "5fcb9e00e3634ced31bcdbac8742f1f6",
+      "urandom_draws": [
+        "01020304",
+        "05060708"
+      ],
+      "ies": "dd430022aa0600200202000100ed100ba3a0005fcb9e00e3634ced31bcdbac8742f1f6010203048e8ab67d3cc1abe3272c4d56289c7f680ffb44e268ec99b01212bad35369dd1b0022aa06010506070888c8170885fb615cde76b400b8ead240773b",
+      "ccmp_key": "3fe1410c585d04b84846c59fd28e650b"
+    },
+    {
+      "name": "pure-random nonce (temporary=true)",
+      "psk": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "temporary": true,
+      "time": 1760000000.75,
+      "randrange_draws": [
+        {
+          "bound": 65536,
+          "value": 4660
+        }
+      ],
+      "plain_nonce": "57656c6c4b6e6f776e53747200011234",
+      "encrypted_nonce": "8629476b89e3bbb4add6de2b931c3f5e",
+      "urandom_draws": [
+        "41424344",
+        "45464748"
+      ],
+      "ies": "dd430022aa0600200202000100ed100ba3a0008629476b89e3bbb4add6de2b931c3f5e414243442640ca0958a044099486cba029c17783879d3818b1da6f04ad7a93cae9bbdd1b0022aa0601454647483c03c23f558aa883a9a42e773897bc77a389",
+      "ccmp_key": "e09122b65aef028eb8719edea35841b7"
+    }
+  ],
+  "nonce_samples": [
+    {
+      "index": 0,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200010000",
+      "encrypted_nonce": "a0b3657759f7543616deb0b0a821a450"
+    },
+    {
+      "index": 1,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200010001",
+      "encrypted_nonce": "29dfe2a21dd104c801b4319851c8ba2f"
+    },
+    {
+      "index": 2,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200010002",
+      "encrypted_nonce": "9d705630b586c89938dc26e0014bf142"
+    },
+    {
+      "index": 3,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200010003",
+      "encrypted_nonce": "487421df45f9595b26ac408c3b13dd86"
+    },
+    {
+      "index": 4,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200010004",
+      "encrypted_nonce": "306c7789d61aeb05eceb9489bb59691b"
+    },
+    {
+      "index": 4660,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200011234",
+      "encrypted_nonce": "8629476b89e3bbb4add6de2b931c3f5e"
+    },
+    {
+      "index": 32767,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200017fff",
+      "encrypted_nonce": "434f84b4a1b90a3df87afe3fa39d481f"
+    },
+    {
+      "index": 32768,
+      "plaintext_nonce": "57656c6c4b6e6f776e53747200018000",
+      "encrypted_nonce": "936765e130964cad06393867899d7687"
+    },
+    {
+      "index": 65534,
+      "plaintext_nonce": "57656c6c4b6e6f776e5374720001fffe",
+      "encrypted_nonce": "783b02d2e4cbf1f716cce41909ef54a4"
+    },
+    {
+      "index": 65535,
+      "plaintext_nonce": "57656c6c4b6e6f776e5374720001ffff",
+      "encrypted_nonce": "abd69f4595bebb339d754cf5879ce877"
+    }
+  ],
+  "nonce_pair": {
+    "time": 1760000000.75,
+    "seq_period": 1800,
+    "randrange_draws": [
+      {
+        "bound": 16,
+        "value": 5
+      },
+      {
+        "bound": 65536,
+        "value": 48879
+      }
+    ],
+    "calls": [
+      {
+        "pure_random": false,
+        "index": 46870,
+        "plain_nonce": "57656c6c4b6e6f776e5374720001b716",
+        "encrypted_nonce": "4ea9c543924876eed12715aa74cb31db"
+      },
+      {
+        "pure_random": false,
+        "index": 46871,
+        "plain_nonce": "57656c6c4b6e6f776e5374720001b717",
+        "encrypted_nonce": "523972003694955ae306fd88a4ea24b1"
+      },
+      {
+        "pure_random": false,
+        "index": 46872,
+        "plain_nonce": "57656c6c4b6e6f776e5374720001b718",
+        "encrypted_nonce": "d7ec60e6be371e39b9b4bff9d7ad1a03"
+      },
+      {
+        "pure_random": true,
+        "index": 48879,
+        "plain_nonce": "57656c6c4b6e6f776e5374720001beef",
+        "encrypted_nonce": "d84937c0539c7679542df67b475487c7"
+      }
+    ]
+  },
+  "nonce_table": {
+    "size": 1048576,
+    "sha256": "7765e627c7b5fdc82dbed41e3a88f30bd7b822424430f1480e4695b2ac738c33"
+  }
+}

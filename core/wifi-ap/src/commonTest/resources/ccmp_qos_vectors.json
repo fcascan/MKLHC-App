@@ -1,0 +1,38 @@
+{
+  "source": "independent CCMP golden generator; CCM core = pyca/cryptography AESCCM; AAD/nonce built per IEEE 802.11 clause 12.5.3.3.3",
+  "generator": "tools/gen_ccmp_qos_vectors.py",
+  "cases": [
+    {
+      "name": "qos-data-tid0-3addr-protected",
+      "tk": "000102030405060708090a0b0c0d0e0f",
+      "header": "88422c0102aabbccdd0102112233445502aabbccdd0230120000",
+      "data": "aaaa03000000080045000014abcd400040117a3cc0a80101c0a801ff",
+      "mpduPlaintext": "88422c0102aabbccdd0102112233445502aabbccdd0230120000aaaa03000000080045000014abcd400040117a3cc0a80101c0a801ff",
+      "headerLength": 26,
+      "pn": "0102030405a0",
+      "keyId": 0,
+      "aad": "884202aabbccdd0102112233445502aabbccdd0200000000",
+      "nonce": "000211223344550102030405a0",
+      "ccmpHeader": "a005002004030201",
+      "ciphertext": "46e5f12c2420f223cbe56800314b2eca9ad81f0c920e4f2cf9fc4579",
+      "mic": "84f80f922aca3c3b",
+      "mpduEncrypted": "88422c0102aabbccdd0102112233445502aabbccdd0230120000a00500200403020146e5f12c2420f223cbe56800314b2eca9ad81f0c920e4f2cf9fc457984f80f922aca3c3b"
+    },
+    {
+      "name": "qos-data-htc-tid6-3addr-protected",
+      "tk": "101112131415161718191a1b1c1d1e1f",
+      "header": "88c23a0002aabbccdd0102112233445502aabbccdd027045965504030201",
+      "data": "aaaa030000000806000102030405060708090a0b0c0d0e0f1011",
+      "mpduPlaintext": "88c23a0002aabbccdd0102112233445502aabbccdd027045965504030201aaaa030000000806000102030405060708090a0b0c0d0e0f1011",
+      "headerLength": 30,
+      "pn": "0000000012c6",
+      "keyId": 0,
+      "aad": "884202aabbccdd0102112233445502aabbccdd0200000600",
+      "nonce": "060211223344550000000012c6",
+      "ccmpHeader": "c612002000000000",
+      "ciphertext": "1dff9ff91813bc784593df9c3bb71c852338cedf55dd71ec607b",
+      "mic": "8e0d90ce3049f103",
+      "mpduEncrypted": "88c23a0002aabbccdd0102112233445502aabbccdd027045965504030201c6120020000000001dff9ff91813bc784593df9c3bb71c852338cedf55dd71ec607b8e0d90ce3049f103"
+    }
+  ]
+}
