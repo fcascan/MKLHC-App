@@ -1,5 +1,6 @@
 // Build file for :core:domain: Kotlin Multiplatform library (desktop + Android).
-// Phase 0: standalone module, no inter-module dependencies wired yet.
+// Pure Kotlin models shared by the orchestration layer and the features (LinkState, KartInfo, ...);
+// it deliberately depends on no other module.
 plugins {
     id("mklhc.kmp.library")
 }

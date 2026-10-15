@@ -90,3 +90,22 @@ HARDWARE-SPIKE / REA confirmation items (documented in code KDocs, NOT bugs - no
 RELEASE items:
 - THIRD_PARTY_NOTICES.md lists OpenKart + mk-live but should add the full BSD-3/MIT license texts (and note the community-wiki specs) before a public release (Phase 8).
 NEXT NON-HARDWARE PIECE - the session orchestrator: :core:data KartSessionRepository + DataStore PairingStore that wire radio -> wifi-ap AP -> netstack NetstackNode -> kart-protocol (RCD server on 5201/5202, FujiControlClient on 5103, FujiPairingClient on 5106, FujiEventChannel on 5107, teleop UDP 5102, telemetry/video UDP) and drive the LinkState machine (pairing + session sequences). Must honour: inject a secure challenge (now default via crypto.secureRandomBytes), run on a single-threaded dispatcher, await TCP accept/read/connect on a node-scoped child, supply a buffered-cold-flow FrameLink (wifi-ap adapter), set connection_info ports (telemetry 5116/control 5032/video 5016 per spec), call dhcpServer.reset() on disassociation. The wifi-ap FrameLink adapter (802.11+LLC/SNAP + CCMP + single-station MAC) and feature UIs (cockpit/pairing/link, MVVM against a fake repository) are the other non-hardware tracks. Task 1.8 GO/NO-GO still needs the adapter + kart.
+
+## Orchestration done (KartSessionRepository); backbone tested end-to-end; next: wifi-ap FrameLink adapter + UI features
+
+- id: orchestration-done-kartsessionrepository-backbone-tested-end-20261015-222447
+- type: platform_workaround
+- status: temporary
+- date: 2026-10-15
+- review_after: 2026-12-15
+
+### Orchestration layer DONE (KartSessionRepository + :core:data foundations): 94 data + 18 domain tests green. The entire radio-agnostic backbone (RadioLink -> wifi-ap AP -> netstack NetstackNode -> kart-protocol RCD/Fuji/teleop/telemetry/video -> KartSessionRepository) is built and tested end-to-end over the in-memory FrameLink with a FakeKart simulator, reaching Driving. Project total ~674 tests.
+DEFERRED (need the real adapter / hardware / UI), none blocking:
+- The REAL wifi-ap FrameLink adapter is the key remaining non-UI piece: a KartRadioAp implementation over RadioLink that runs the ApStateMachine + CCMP + LLC/SNAP, exposes frameLink.inbound as a BUFFERED COLD FLOW, drives adapterState/associatedStation truthfully, and beacon(GAME)/beacon(PAIRING, PairingNetwork(ssid,seed,channel)) actually switch the advertised network (AP derives pairing PSK = SHA-256(seed)). Android radio (Phase 2: radiod NDK build + USB fd handoff) is part of this on Android.
+- Adapter unplug mid-session does not return to NoAdapter/AwaitingUsbPermission (awaitAdapterReady observes adapterState only at startup); needs the real adapter emitting continuous state + a mid-session observer.
+- KartLeased is emitted on RCD accept, not from a real DHCP lease; the FakeKart assumes the lease so the DHCP-lease path to a real kart is unexercised. dhcpServer.reset() is now called on disassociation.
+- The 5s post-handshake connect window now uses one shared deadline, but the real timing margin is unverified against hardware.
+- LinkState has no idle/stopped rung; cancelPairing() uses Failed("pairing cancelled"). Consider adding an Idle state for the UI.
+- I1 deadman uses an injectable TimeSource (production = TimeSource.Monotonic; tests inject the scheduler's) because Monotonic does not advance under runTest virtual time.
+- setCaptureEnabled is a stored flag only (no pcap yet); keystore-wrapping the stored master secret; THIRD_PARTY_NOTICES full license texts - all before release (Phase 8).
+NEXT NON-HARDWARE PIECE: the UI features (Phase 5-7) - :core:design-system + :feature:link/pairing/cockpit screens (MVVM) built against KartSessionRepository (or a fake of it): link/adapter status, the pairing QR screen, the cockpit (video surface, touch drive controls feeding setDriveCommand, telemetry HUD). The repository's flows/commands are ready. The wifi-ap FrameLink adapter is the other non-UI track (partly testable, finished on hardware).

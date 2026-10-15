@@ -6,7 +6,7 @@ Every external origin the project draws on is listed below, with its repository,
 
 | Component | Repository | SPDX license | How MKLHC-App uses it |
 | --- | --- | --- | --- |
-| OpenKart SDK | https://github.com/OpenKart-SDK | BSD-3-Clause | LP2P access-point keys/IEs, RCD protocol and Fuji control/pairing logic are ported to Kotlin. |
+| OpenKart SDK | https://github.com/OpenKart-SDK | BSD-3-Clause | LP2P access-point keys/IEs, RCD protocol, Fuji control/pairing logic and the installation-identity derivation (`openkartd/config.py`) are ported to Kotlin. |
 | mk-live | https://github.com/olus85/mk-live | MIT | Video (LSP/FRAM) reassembly, LVNI keepalive and event-channel responses are ported to Kotlin. |
 | devourer | https://github.com/OpenIPC/devourer | GPL-2.0-only | Userspace USB Wi-Fi driver, linked only inside the separate GPL-2.0 `radiod` helper process. |
 | PixelPilot | https://github.com/OpenIPC/PixelPilot | GPL-3.0-only | Reference only for the Android USB-file-descriptor technique; no code copied. |

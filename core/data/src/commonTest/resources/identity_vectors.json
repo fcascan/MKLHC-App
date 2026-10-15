@@ -1,0 +1,41 @@
+{
+  "source": "OpenKart openkartd/config.py Config.process derive(); HMAC-SHA512(key=secret, msg=name)[:length]",
+  "lengths": {
+    "ssid_random": 12,
+    "psk": 32,
+    "rcd_ident": 16,
+    "rcd_master_key": 64
+  },
+  "vectors": [
+    {
+      "name": "ascii string secret (reference path)",
+      "secret_hex": "6d6b6c68632d746573742d7365637265742d30303031",
+      "secret_text": "mklhc-test-secret-0001",
+      "ssid_random_hex": "6ea1ffb993219dfabe709f5a",
+      "ssid_tail_b64": "bqH/uZMhnfq+cJ9a",
+      "psk": "acc95510a3e34dfd0a4e6ad36475d9f202f5f179bb8f2c49b143bfc6ee8be2ab",
+      "rcd_ident": "c90dcff0665a93be048ddfd3544e8dea",
+      "rcd_master_key": "aef7fac5da1f1d988835054da6cf576dcacc5d3e40b7e5a4d7577356183826d94928a1c46033177ad94989c3a5ea65f8e0607e449f47e79aa75bd4e160fc37b9"
+    },
+    {
+      "name": "non-ASCII string secret, UTF-8 encoded",
+      "secret_hex": "73c3a9637265742dc3b12de29883",
+      "secret_text": "sécret-ñ-☃",
+      "ssid_random_hex": "ea7e2b36eb8c42e57c5e6f84",
+      "ssid_tail_b64": "6n4rNuuMQuV8Xm+E",
+      "psk": "2eb9e3759b056c9ab2261f04329a68cb4497f821360b34519f4b85b0af519e68",
+      "rcd_ident": "5fa366ae6a7f23106452a38941d45f11",
+      "rcd_master_key": "5fef532115628ec93c4e50f1628eb3afa41bc0a8021603554ec59a99cc526e5759c04472cff3b026ba18b9cad2953a606dac60e9237e2c88a37fa4a5cf2f971e"
+    },
+    {
+      "name": "raw 32-octet master secret (app path)",
+      "secret_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "secret_text": null,
+      "ssid_random_hex": "4d66eebaf31412f49426a7e4",
+      "ssid_tail_b64": "TWbuuvMUEvSUJqfk",
+      "psk": "30b34294b286328fddc08af1b579adedb77b11a009da18cc3c7518f98404a699",
+      "rcd_ident": "4086a5d233b9e483a5386221a7e99bc4",
+      "rcd_master_key": "d25da62b03a55ff974a521636141dd1fc6eb6fedc7cbe995043ed5d93f909edaaac41ad32722c2000fd8370ef9c0eeacb2f2c220882f062027d626760682a95b"
+    }
+  ]
+}
