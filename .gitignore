@@ -42,5 +42,9 @@ radiod/build/
 radiod/devourer/build/
 *.o
 
+# Radio spike captures (decrypted kart traffic; never commit)
+spike-captures/
+*.pcap
+
 # MobiAI generated code graph (regenerable; brain/ is kept on purpose)
 .mobiai/graph/
