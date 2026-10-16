@@ -109,3 +109,18 @@ DEFERRED (need the real adapter / hardware / UI), none blocking:
 - I1 deadman uses an injectable TimeSource (production = TimeSource.Monotonic; tests inject the scheduler's) because Monotonic does not advance under runTest virtual time.
 - setCaptureEnabled is a stored flag only (no pcap yet); keystore-wrapping the stored master secret; THIRD_PARTY_NOTICES full license texts - all before release (Phase 8).
 NEXT NON-HARDWARE PIECE: the UI features (Phase 5-7) - :core:design-system + :feature:link/pairing/cockpit screens (MVVM) built against KartSessionRepository (or a fake of it): link/adapter status, the pairing QR screen, the cockpit (video surface, touch drive controls feeding setDriveCommand, telemetry HUD). The repository's flows/commands are ready. The wifi-ap FrameLink adapter is the other non-UI track (partly testable, finished on hardware).
+
+## UI layer done (Compose MVVM); whole app tested in software; next: :app wiring + wifi-ap FrameLink adapter + hardware
+
+- id: ui-layer-done-compose-mvvm-whole-app-tested-in-software-next-20261016-013257
+- type: platform_workaround
+- status: temporary
+- date: 2026-10-16
+- review_after: 2026-12-15
+
+### UI layer DONE (Compose Multiplatform, MVVM). ~370 UI tests green: core:presentation 11 (UiText), core:design-system 41 (dark cockpit AppTheme, Canvas HUD widgets, touch drive controls with release=neutral), core:video 15 (VideoSurface expect/actual: Android MediaCodec device-UNVERIFIED, desktop placeholder), feature:link 27, feature:pairing 42 (QR via ZXing byte-mode ECC M, decode-round-trip tested), feature:cockpit 59 (IMU->HUD conflated ~20Hz, controls->setDriveCommand raw, NEUTRAL on release/pause/dispose/leave-Driving + 100ms keep-alive under the 250ms deadman). core:data extracted a KartSession interface (KartSessionRepository implements it) + FakeKartSession. Project total ~883 tests across the whole software stack.
+STATE: the ENTIRE app is built and tested in software end-to-end with fakes (radio seam -> wifi-ap AP -> netstack -> kart-protocol -> KartSessionRepository -> UI). What remains is NOT software logic:
+WHAT'S LEFT (deferred):
+1. :app WIRING (next non-hardware piece, mostly): Koin startup binding KartSession (to the real KartSessionRepository, which needs a real KartRadioAp) + include linkFeatureModule/pairingFeatureModule/cockpitFeatureModule; the navigation graph using the Root callbacks (LinkRoot onNavigateToPairing/onNavigateToCockpit, PairingRoot onPaired/onCancel, CockpitRoot onNavigateBack); AppTheme at the root; Android USB-permission UI + landscape; desktop needs kotlinx-coroutines-swing for Dispatchers.Main (in the catalog). Demoable on desktop now by binding a FakeKartSession; the real session needs the wifi-ap adapter. Also: KartInfoUi has hardcoded "Kart N"/firmware strings to localize; exclude datastore/ from Android auto-backup.
+2. The REAL wifi-ap FrameLink adapter (KartRadioAp impl over RadioLink: ApStateMachine + CCMP + LLC/SNAP + beacon GAME/PairingNetwork switching, frameLink.inbound a buffered cold flow). Partly testable, finished on hardware. Android radio (Phase 2: radiod NDK + USB fd handoff) is part of this.
+3. HARDWARE: Task 1.8 GO/NO-GO (needs the Realtek adapter + kart); on-device MediaCodec verification; desktop H.264 decoder (separate spike); IMU->HUD mapping + all the protocol unknowns confirmed via REA captures.

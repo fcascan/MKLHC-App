@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Cockpit screen -->
+    <string name="cockpit_back">Leave the cockpit</string>
+    <string name="cockpit_throttle_label">THROTTLE</string>
+    <string name="cockpit_throttle_unit">%</string>
+    <string name="cockpit_waiting_hint">The controls are off until the kart is driving.</string>
+</resources>

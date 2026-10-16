@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Spoken descriptions (accessibility) of the HUD widgets -->
+    <string name="cd_battery">Battery, %1$d of 4 bars</string>
+    <string name="cd_battery_charging">Battery, %1$d of 4 bars, charging</string>
+    <string name="cd_signal">Signal, %1$d of 4 bars, %2$d dBm</string>
+    <string name="cd_signal_unknown">Signal strength unknown</string>
+    <string name="cd_horizon">Artificial horizon, pitch %1$d degrees, roll %2$d degrees</string>
+    <string name="cd_g_meter">G meter, lateral %1$s g, longitudinal %2$s g</string>
+
+    <!-- Spoken descriptions and states of the drive controls -->
+    <string name="cd_steering">Steering</string>
+    <string name="state_steering_centered">Centered</string>
+    <string name="state_steering_left">%1$d percent left</string>
+    <string name="state_steering_right">%1$d percent right</string>
+    <string name="cd_throttle">Throttle</string>
+    <string name="state_throttle_neutral">Neutral</string>
+    <string name="state_throttle_forward">%1$d percent forward</string>
+    <string name="state_throttle_reverse">%1$d percent reverse</string>
+    <string name="cd_brake_light">Brake light, hold to light</string>
+    <string name="state_on">On</string>
+    <string name="state_off">Off</string>
+
+    <!-- Visible labels on the drive controls -->
+    <string name="label_forward">FWD</string>
+    <string name="label_reverse">REV</string>
+    <string name="label_brake">BRAKE</string>
+</resources>

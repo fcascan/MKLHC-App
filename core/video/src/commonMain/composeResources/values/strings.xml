@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Desktop placeholder of the video surface -->
+    <string name="video_unavailable_desktop">Video preview unavailable on desktop</string>
+    <string name="video_frames_received">Receiving video: %1$d frames</string>
+</resources>

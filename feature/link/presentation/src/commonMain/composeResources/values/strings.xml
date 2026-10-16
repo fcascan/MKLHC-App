@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Link screen -->
+    <string name="link_title">Kart link</string>
+    <string name="link_start">Start</string>
+    <string name="link_pair">Pair a kart</string>
+    <string name="link_cockpit">Open cockpit</string>
+
+    <!-- Kart information card -->
+    <string name="link_kart_title">Kart</string>
+    <string name="link_kart_unknown">No kart identified yet</string>
+    <string name="link_label_serial">Serial</string>
+    <string name="link_label_variant">Variant</string>
+    <string name="link_label_firmware">Firmware</string>
+    <string name="link_label_battery">Battery</string>
+
+    <!-- Diagnostics -->
+    <string name="link_diagnostics_title">Diagnostics</string>
+    <string name="link_capture_label">Capture packets</string>
+</resources>

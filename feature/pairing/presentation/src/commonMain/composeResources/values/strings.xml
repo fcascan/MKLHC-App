@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Pairing screen -->
+    <string name="pairing_title">Pair a kart</string>
+    <string name="pairing_instructions">Point the kart camera at the code.</string>
+    <string name="pairing_preparing_code">Preparing the pairing code</string>
+    <string name="pairing_code_error">The pairing code could not be shown.</string>
+    <string name="pairing_cancel">Cancel</string>
+    <string name="pairing_retry">Try again</string>
+
+    <!-- Spoken description of the QR code -->
+    <string name="cd_pairing_qr">Pairing code for the kart to scan</string>
+</resources>

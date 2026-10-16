@@ -15,5 +15,3 @@ This is an independent interoperability project, not affiliated with, endorsed b
 - The app is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE).
 - The `radiod/` radio helper is licensed under the GNU General Public License v2.0 only (GPL-2.0-only). See [radiod/LICENSE](radiod/LICENSE).
 - Third-party components are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-Design and implementation plans are kept locally under `.ia-docs/` (not committed).

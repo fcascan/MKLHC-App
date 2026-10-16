@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Generic errors -->
+    <string name="error_unknown">Something went wrong.</string>
+    <string name="error_with_detail">Something went wrong: %1$s</string>
+
+    <!-- Link state: one line per rung of the connection ladder -->
+    <string name="link_no_adapter">No radio adapter found</string>
+    <string name="link_awaiting_usb_permission">Waiting for USB permission</string>
+    <string name="link_radio_starting">Starting the radio</string>
+    <string name="link_beaconing_game">Waiting for the kart to join</string>
+    <string name="link_beaconing_pairing">Waiting for the kart to pair</string>
+    <string name="link_kart_associated">Kart joined the network</string>
+    <string name="link_kart_leased">Kart received its address</string>
+    <string name="link_kart_handshaked">Kart connected</string>
+    <string name="link_kart_ready">Kart ready</string>
+    <string name="link_driving">Driving</string>
+    <string name="link_recovering">Link lost, reconnecting: %1$s</string>
+    <string name="link_failed">Link failed: %1$s</string>
+</resources>

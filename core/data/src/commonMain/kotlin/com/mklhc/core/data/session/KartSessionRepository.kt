@@ -74,7 +74,8 @@ import kotlin.time.TimeSource
 /**
  * The orchestration capstone: it brings the radio and access point up, runs the network stack on the
  * link, and drives the kart through the pairing and session sequences, publishing where it stands as a
- * [LinkState] so the UI can follow along.
+ * [LinkState] so the UI can follow along. It is the production [KartSession]; the feature ViewModels depend on
+ * that interface and tests substitute [FakeKartSession].
  *
  * Business logic: this is the one place the lower layers meet. It owns none of the protocols; it wires
  * them. OUR app hosts the RCD SERVER (the kart connects in), and once the handshake completes the app
@@ -122,7 +123,7 @@ class KartSessionRepository(
     private val clock: () -> Long,
     private val config: SessionConfig = SessionConfig(),
     private val timeSource: TimeSource = TimeSource.Monotonic,
-) {
+) : KartSession {
     private val log = Logger.withTag(TAG)
 
     // Everything the repository launches hangs off this supervisor so one failing loop never takes the
@@ -133,22 +134,22 @@ class KartSessionRepository(
     private val _linkState = MutableStateFlow<LinkState>(LinkState.NoAdapter)
 
     /** Where the link currently stands; the UI follows this to show progress and recovery. */
-    val linkState: StateFlow<LinkState> = _linkState.asStateFlow()
+    override val linkState: StateFlow<LinkState> = _linkState.asStateFlow()
 
     private val _kartInfo = MutableStateFlow<KartInfo?>(null)
 
     /** What the app has learned about the identified kart, or null before it is identified. */
-    val kartInfo: StateFlow<KartInfo?> = _kartInfo.asStateFlow()
+    override val kartInfo: StateFlow<KartInfo?> = _kartInfo.asStateFlow()
 
     private val _telemetry = MutableStateFlow<Telemetry?>(null)
 
     /** The most recent decoded telemetry datagram, of any kind, or null before the first one. */
-    val telemetry: StateFlow<Telemetry?> = _telemetry.asStateFlow()
+    override val telemetry: StateFlow<Telemetry?> = _telemetry.asStateFlow()
 
     private val _battery = MutableStateFlow<Telemetry.BatteryStatus?>(null)
 
     /** The most recent battery/charging status, or null before the first one. */
-    val battery: StateFlow<Telemetry.BatteryStatus?> = _battery.asStateFlow()
+    override val battery: StateFlow<Telemetry.BatteryStatus?> = _battery.asStateFlow()
 
     // DROP_OLDEST, not the default SUSPEND: these are emitted from the telemetry / video read loops, so a
     // slow or absent collector must never back-pressure those loops and stall the live telemetry StateFlow.
@@ -158,7 +159,7 @@ class KartSessionRepository(
     )
 
     /** The IMU telemetry packets as they arrive. */
-    val imu: Flow<Telemetry.Imu> = _imu.asSharedFlow()
+    override val imu: Flow<Telemetry.Imu> = _imu.asSharedFlow()
 
     private val _videoAccessUnits = MutableSharedFlow<ByteArray>(
         extraBufferCapacity = VIDEO_BUFFER,
@@ -166,12 +167,12 @@ class KartSessionRepository(
     )
 
     /** Reassembled H.264 access units as they are completed from the kart's video stream. */
-    val videoAccessUnits: Flow<ByteArray> = _videoAccessUnits.asSharedFlow()
+    override val videoAccessUnits: Flow<ByteArray> = _videoAccessUnits.asSharedFlow()
 
     private val _pairingQr = MutableStateFlow<ByteArray?>(null)
 
     /** The pairing QR payload while the app is beaconing the pairing network, or null otherwise. */
-    val pairingQr: StateFlow<ByteArray?> = _pairingQr.asStateFlow()
+    override val pairingQr: StateFlow<ByteArray?> = _pairingQr.asStateFlow()
 
     // The latest command the UI set and whether it is fresh since the teleop loop last looked. Both are
     // read and written from any thread (setDriveCommand), so both are volatile; a reference and a boolean
@@ -208,7 +209,7 @@ class KartSessionRepository(
      * the game network and drive the session (with automatic recovery) until [stop]. Launches the work and
      * returns; progress is published through [linkState]. Calling it again restarts the flow.
      */
-    suspend fun start() {
+    override suspend fun start() {
         log.i { "start(): starting the session flow" }
         relaunchOrchestrator(startWithPairing = false)
     }
@@ -218,7 +219,7 @@ class KartSessionRepository(
      * game credentials and then fall into the normal session. The pairing QR payload is published through
      * [pairingQr] while the pairing network is up.
      */
-    suspend fun startPairing() {
+    override suspend fun startPairing() {
         log.i { "startPairing(): starting the pairing flow" }
         relaunchOrchestrator(startWithPairing = true)
     }
@@ -229,7 +230,7 @@ class KartSessionRepository(
      * the pairing network, and settles the link on a terminal state so the UI is not stuck on
      * [LinkState.Beaconing]. A later [start] / [startPairing] restarts the flow.
      */
-    fun cancelPairing() {
+    override fun cancelPairing() {
         log.i { "cancelPairing(): cancelling" }
         _pairingQr.value = null
         val cancelled = orchestratorJob
@@ -257,27 +258,27 @@ class KartSessionRepository(
      * Sets the latest drive command the teleop loop will send. Safe to call from any thread; it only
      * records the command, which the 30 Hz loop picks up on its next tick.
      */
-    fun setDriveCommand(command: DriveCommand) {
+    override fun setDriveCommand(command: DriveCommand) {
         latestDriveCommand = command
         driveCommandFresh = true
     }
 
     /** Puts the kart to sleep (stops accepting drive) and forces a neutral command, when it is reachable. */
-    suspend fun sleepKart() {
+    override suspend fun sleepKart() {
         log.i { "sleepKart(): parking the kart" }
         runGuarded("sleepKart forcing neutral") { currentSession?.forceNeutral() }
         runGuarded("sleepKart parking the kart") { currentControl?.setState(FujiControlClient.STATE_SLEEP) }
     }
 
     /** Powers the kart off, when it is reachable. */
-    suspend fun shutdownKart() {
+    override suspend fun shutdownKart() {
         log.i { "shutdownKart(): powering the kart off" }
         runGuarded("shutdownKart forcing neutral") { currentSession?.forceNeutral() }
         runGuarded("shutdownKart powering the kart off") { currentControl?.shutdown() }
     }
 
     /** Enables or disables packet capture (a flag only for now). */
-    fun setCaptureEnabled(enabled: Boolean) {
+    override fun setCaptureEnabled(enabled: Boolean) {
         captureEnabled = enabled
         log.i { "setCaptureEnabled(): capture is now -> enabled=$enabled" }
     }
@@ -287,7 +288,7 @@ class KartSessionRepository(
      * down. This is terminal; after it every coroutine the repository started has ended and the instance
      * is not restarted.
      */
-    suspend fun stop(): Unit = withContext(NonCancellable) {
+    override suspend fun stop(): Unit = withContext(NonCancellable) {
         // All of teardown runs under NonCancellable so a cancelled caller (a closing screen scope) can never
         // abort it part-way and leave the node, radio or repository coroutines standing. Inside this block
         // cancellation is not thrown at suspension points, so the safety calls catch only real failures.
