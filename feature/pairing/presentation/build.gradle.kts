@@ -11,6 +11,8 @@ plugins {
     id("mklhc.kmp.compose")
     id("mklhc.koin")
     id("mklhc.testing")
+    // The route objects of the navigation graph are @Serializable (type-safe navigation).
+    alias(libs.plugins.kotlin.serialization)
 }
 
 kotlin {
@@ -25,6 +27,8 @@ kotlin {
             implementation(project(":core:design-system"))
             // ViewModel is the PairingViewModel supertype; collectAsStateWithLifecycle is used by the Root.
             api(libs.jetbrains.lifecycle.viewmodel.compose)
+            // NavGraphBuilder and NavController are part of the public navigation-graph function of this module.
+            api(libs.jetbrains.navigation.compose)
             implementation(libs.jetbrains.lifecycle.runtime.compose)
             implementation(libs.kotlinx.coroutines.core)
             implementation(libs.kermit)

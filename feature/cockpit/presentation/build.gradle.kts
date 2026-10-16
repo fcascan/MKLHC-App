@@ -10,6 +10,8 @@ plugins {
     id("mklhc.kmp.compose")
     id("mklhc.koin")
     id("mklhc.testing")
+    // The route objects of the navigation graph are @Serializable (type-safe navigation).
+    alias(libs.plugins.kotlin.serialization)
 }
 
 kotlin {
@@ -22,6 +24,8 @@ kotlin {
             api(project(":core:presentation"))
             // ViewModel is the CockpitViewModel supertype; collectAsStateWithLifecycle is used by the Root.
             api(libs.jetbrains.lifecycle.viewmodel.compose)
+            // NavGraphBuilder and NavController are part of the public navigation-graph function of this module.
+            api(libs.jetbrains.navigation.compose)
             // The HUD widgets, the drive controls and driveCommandOf.
             implementation(project(":core:design-system"))
             // VideoSurface, the platform seam that renders the kart's H.264 stream.

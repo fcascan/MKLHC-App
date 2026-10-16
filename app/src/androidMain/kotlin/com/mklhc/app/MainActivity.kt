@@ -7,7 +7,8 @@ import androidx.activity.compose.setContent
 
 /**
  * Single launcher Activity of the Android app. It owns no business logic: it only hosts the shared
- * Compose UI ([App]) that is also used by the desktop entry point.
+ * Compose UI ([App]) that is also used by the desktop entry point. Koin is already running by the time it is
+ * created, because [MklhcApplication] starts it.
  */
 class MainActivity : ComponentActivity() {
 
