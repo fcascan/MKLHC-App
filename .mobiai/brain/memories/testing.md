@@ -19,3 +19,26 @@ Validate the LP2P/CCMP crypto in commonTest against golden vectors computed outs
 - LP2P keys/IEs: generate vectors with tools/gen_lp2p_vectors.py, which imports OpenKart openkartd/lp2p.py with os.urandom and random monkeypatched to fixed seeds, and emits psk/ccmp_key/ie_bytes JSON. Same script converts lp2p_nonces.py to a binary resource.
 ### Why
 These are interop crypto paths where a silent byte error means the kart simply never associates, with no useful error. Golden vectors catch it in a unit test instead of on hardware.
+
+## Building radiod on the Windows dev PC (VS Build Tools 2026) and the no-kart smoke test
+
+- id: building-radiod-on-the-windows-dev-pc-vs-build-tools-2026-an-20261020-181140
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Environment (verified 2026-10-20 on the dev PC)
+- Compiler: Visual Studio Build Tools 2026 (MSVC 14.50.35717, Windows SDK 10.0.26100.0). Not on PATH: use the "x64 Native Tools Command Prompt" or call VC\Auxiliary\Build\vcvars64.bat.
+- CMake: use the Build Tools' own CMake (4.1.2-msvc8, default generator "Visual Studio 18 2026"), which is on PATH inside the developer prompt. The Android SDK CMake 4.1.2 only knows generators up to Visual Studio 17 2022; with it, use `-G Ninja` (its bin has ninja.exe) inside vcvars64.
+- vcpkg: the Build Tools' bundled vcpkg is manifest-only ("This vcpkg distribution does not have a classic mode instance"), so radiod's VCPKG_ROOT path needs a standalone vcpkg: clone microsoft/vcpkg, run bootstrap-vcpkg.bat, `vcpkg install libusb pkgconf --triplet x64-windows`, set VCPKG_ROOT. libusb-1.0.dll must sit next to radiod.exe.
+- Missing on that date: standalone vcpkg + libusb + pkgconf, the radiod/devourer submodule, and the WinUSB binding.
+
+### No-kart smoke test (before the GO/NO-GO)
+With the T3U bound to WinUSB (Zadig shows it as "802.11ac NIC", USB ID 2357 012D; the PC has other Wi-Fi adapters, pick that one), run `./gradlew :app:runSpike --args="--vid 2357 --pid 012d --duration 60 --verbose"`. Pass: radiod connects, logs `radio up: chip=...` (READY) and the beacon starts without an error. If bring-up fails, replug the adapter (8822B cold-boot chip-id transient / firmware download retry) and run again.
+
+### Files
+- radiod/CMakeLists.txt
+- radiod/README.md
+- docs/HARDWARE_SETUP.md

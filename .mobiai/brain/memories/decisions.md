@@ -285,3 +285,32 @@ An earlier version auto-skipped the Android target when no SDK was detected, whi
 
 ### Files
 - build-logic/src/main/kotlin/com/mklhc/buildlogic/BuildLogicExtensions.kt
+
+## Adapter in hand: TP-Link Archer T3U (2357:012d, 8822B die) verified compatible; RTL8811CU downgraded
+
+- id: adapter-in-hand-tp-link-archer-t3u-2357-012d-8822b-die-verif-20261020-181043
+- type: architecture_decision
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Decision
+The development adapter is a TP-Link Archer T3U, USB 2357:012D REV 0210, and it is accepted for the radio spike and Phase 2. The Windows Realtek INF installs it as tplink_RTL8812bu; devourer detects it by REG_SYS_CFG2 chip-id 0x0a as the 8822B die (RtlJaguar2Device, variant C8822B), so RTL8812BU and RTL8822BU name the same silicon here. Run the spike with `--vid 2357 --pid 012d` (its default is 0bda:c812). RTL8811CU (C8821C) is downgraded from low-power option until its unicast retry behavior is bench-checked.
+
+### Reason
+Verified on 2026-10-20 against OpenIPC/devourer master (README, docs/ap-mode.md, docs/aggregation.md, src/WiFiDriver.cpp, src/jaguar2/RtlJaguar2Device.cpp):
+- The README lists RTL8822BU TP-Link Archer T3U (2357:012d) as supported and benchmarked; the 8822B chip-id in WiFiDriver.cpp was read off an Archer T3U.
+- The Jaguar1 defect does not apply: the Jaguar2 TX descriptor sets BMC from addr1's group bit, so unicast frames to the kart wait for an ACK; RTY_LMT_EN=1 with cfg.tx.retry_limit, and tx_retry_limit_ok is advertised only for C8822B (not C8821C). radiod passes --retry-limit (default 7) as cfg.tx.retry_limit.
+- StartBeacon on Jaguar2 is hardware-validated on 2357:012d (beacon at TBTT). The AP harnesses (auth/assoc at retry=0 via the MACID ACK engine, software CCMP) are bench-validated on J2/J3. The BSSID must be unicast, which SpikePairing already ensures.
+- Jaguar2 quirk: any TBTT re-latch (changing the interval or toggling EN_BCN_FUNCTION after StartBeacon) stops the beacon until it is re-downloaded. radiod's UPDATE_BEACON uses UpdateBeaconPayload, which re-downloads, so the game-network switch is safe; never change the interval of a running beacon.
+- Operational caveats from devourer: a dense beacon interval (25 TU) helped scanners find the AP (our default is 100; tune with --beacon-interval), and an adapter on an xHCI root-hub port without VBUS reset (as on the dev PC) can get flaky after many runs, so replug between runs.
+
+### Alternatives considered
+- Wait for an RTL8812CU (0bda:c812): still the most validated (Jaguar3), but not sold on amazon.com; the T3U shares the HalMAC 88xx TX path family.
+- RTL8812AU: rejected (Jaguar1 broadcast TX descriptor, no unicast retries).
+
+### Files
+- docs/HARDWARE_SETUP.md
+- radiod/src/Radio.cpp
+- radiod/src/main.cpp

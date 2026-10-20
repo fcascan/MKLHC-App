@@ -22,8 +22,8 @@ under Details, Hardware Ids, for example `USB\VID_0BDA&PID_C812`).
 | VID:PID | Chip | Example product | Notes |
 |---|---|---|---|
 | `0bda:c812` | RTL8812CU | LB-LINK WDN1300H | Reference adapter. Start here. |
-| `2357:012d` | RTL8822BU | TP-Link Archer T3U | Widely sold alternative. |
-| `0bda:c811` | RTL8811CU | COMFAST CF-811AC | Low-power option. |
+| `2357:012d` | RTL8822BU (also labelled RTL8812BU; same 8822B chip) | TP-Link Archer T3U | Widely sold alternative. The userspace driver was developed and bench-tested on this exact adapter. Run the spike with `--vid 2357 --pid 012d`. |
+| `0bda:c811` | RTL8811CU | COMFAST CF-811AC | Not recommended for now: the userspace driver applies the unicast retry limit, which the kart link relies on, only on the 8822B, not on this chip. |
 | `0bda:8812` | RTL8812AU | ALFA AWUS036ACH | Allowed, not recommended: this chip family has no hardware retries for unicast frames, so frames to the kart can be lost. |
 
 The spike opens `0bda:c812` by default; use `--vid` and `--pid` (hexadecimal) for another adapter from the table.
@@ -78,6 +78,11 @@ built from `radiod/` against the userspace driver, which the repository author a
 cmake -S radiod -B radiod/build
 cmake --build radiod/build --config Release
 ```
+
+On Windows, run these from the **x64 Native Tools Command Prompt** of Visual Studio Build Tools 2026 (or later): its
+CMake knows the Visual Studio 2026 generator. The CMake that comes with the Android SDK does not, so with that one add
+`-G Ninja`. The vcpkg bundled with Visual Studio only works in manifest mode, so install a standalone vcpkg for libusb
+as described in [`radiod/README.md`](../radiod/README.md).
 
 The spike looks for the result at `radiod/build/Release/radiod.exe`, `radiod/build/radiod.exe` or `radiod/build/radiod`;
 pass `--radiod <path>` if it is somewhere else.
