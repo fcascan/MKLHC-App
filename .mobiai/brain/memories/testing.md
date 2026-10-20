@@ -34,9 +34,16 @@ These are interop crypto paths where a silent byte error means the kart simply n
 - CMake: use the Build Tools' own CMake (4.1.2-msvc8, default generator "Visual Studio 18 2026"), which is on PATH inside the developer prompt. The Android SDK CMake 4.1.2 only knows generators up to Visual Studio 17 2022; with it, use `-G Ninja` (its bin has ninja.exe) inside vcvars64.
 - vcpkg: the Build Tools' bundled vcpkg is manifest-only ("This vcpkg distribution does not have a classic mode instance"), so radiod's VCPKG_ROOT path needs a standalone vcpkg: clone microsoft/vcpkg, run bootstrap-vcpkg.bat, `vcpkg install libusb pkgconf --triplet x64-windows`, set VCPKG_ROOT. libusb-1.0.dll must sit next to radiod.exe.
 - Missing on that date: standalone vcpkg + libusb + pkgconf, the radiod/devourer submodule, and the WinUSB binding.
+- Resolved the same day: standalone vcpkg at C:\vcpkg (libusb 1.0.30, pkgconf 3.0.3, VCPKG_ROOT set for the user), devourer submodule pinned at 357f045, radiod built at radiod/build/Release/radiod.exe with libusb-1.0.dll deployed next to it. Only the WinUSB binding remained.
 
 ### No-kart smoke test (before the GO/NO-GO)
-With the T3U bound to WinUSB (Zadig shows it as "802.11ac NIC", USB ID 2357 012D; the PC has other Wi-Fi adapters, pick that one), run `./gradlew :app:runSpike --args="--vid 2357 --pid 012d --duration 60 --verbose"`. Pass: radiod connects, logs `radio up: chip=...` (READY) and the beacon starts without an error. If bring-up fails, replug the adapter (8822B cold-boot chip-id transient / firmware download retry) and run again.
+With the T3U bound to WinUSB (Zadig may show it as "802.11ac NIC" or "TP-Link Wireless USB Adapter"; the USB ID 2357 012D is what identifies it, and the PC has other Wi-Fi adapters), run `./gradlew :app:runSpike --args="--vid 2357 --pid 012d --duration 60 --verbose"`. Pass: radiod connects, logs `radio up: chip=...` (READY) and the beacon starts without an error. If bring-up fails, replug the adapter (8822B cold-boot chip-id transient / firmware download retry) and run again.
+
+### Jaguar2 operational facts (from devourer's notes at 357f045)
+- The chip keeps airing the beacon after the session ends unless StopBeacon is sent (Jaguar2 has no teardown power-down): stop the spike cleanly, and unplug the adapter after a hard kill.
+- SetAckResponder before StartBeacon is safe: StartBeacon is refused only while a station identity (SetStationIdentity) owns port 0, and SetAckResponder does not arm one.
+- The T3U has internal antennas: devourer measured delivery collapsing at MCS6-7 on it while low rates stayed near 100%. Keep the kart close in early tests and prefer low rates; consider an external-antenna adapter for range.
+- An error path can be exercised without touching the adapter by running the spike with an absent VID:PID (e.g. `--vid 0bda --pid c812`).
 
 ### Files
 - radiod/CMakeLists.txt

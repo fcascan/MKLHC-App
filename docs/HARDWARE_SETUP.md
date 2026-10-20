@@ -47,7 +47,9 @@ adapter** until you restore the original driver (see below). Use a dedicated ada
 1. Plug the adapter in and download Zadig from https://zadig.akeo.ie.
 2. Start Zadig and choose **Options, List All Devices**.
 3. Pick the adapter in the drop-down. Check that the USB ID shown is one from the table (for the reference adapter,
-   `0BDA C812`). Wi-Fi adapters often appear with a generic name such as `802.11ac NIC`. If the adapter lists several
+   `0BDA C812`; for the TP-Link Archer T3U, `2357 012D`). Wi-Fi adapters often appear with a generic name such as
+   `802.11ac NIC`, or with the name of their current driver, such as `TP-Link Wireless USB Adapter`; the USB ID is what
+   identifies them. If the adapter lists several
    interfaces, choose the Wi-Fi one (normally interface 0).
 4. In the driver box, on the right of the arrow, select **WinUSB**.
 5. Click **Replace Driver** (or **Install Driver**) and wait for the success message.
@@ -168,6 +170,7 @@ git) and do not share it without looking at it first.
 | The beacon runs but the kart never joins | Make sure the kart is in pairing mode and sees the QR code, try another `--channel`, move the adapter close to the kart, and try `--beacon-interval 50` or a higher `--tx-power`. Association needs a signal in both directions. |
 | `auth` appears with `retry=1` | The kart's frames were not acknowledged in time. Try a different channel or a closer position. |
 | The kart joins but no `DHCP DISCOVER` appears | Look for `CCMP rejected a frame` in the log: the key does not match, which usually means a stale QR code was scanned. Restart the spike and scan the new one. |
+| The beacon keeps airing after the spike was killed | Stop the spike with Enter or `--duration` so `radiod` can stop the beacon. RTL8822BU / RTL8812BU adapters (such as the Archer T3U) keep beaconing after a hard kill until they are unplugged, so unplug the adapter in that case. |
 
 Run the spike once with a stable setup and note what you changed (beacon interval, power, channel, timing): those
 values are the hardware tuning the project records after the spike.

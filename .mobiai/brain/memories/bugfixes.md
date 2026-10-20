@@ -137,8 +137,9 @@ WHAT'S LEFT (deferred):
 ### Problem
 First end-to-end spike run against the real radiod on Windows (2026-10-20, adapter not yet bound to WinUSB): OPEN_DEVICE fails fatally, radiod writes ERROR (code 10, "not bound to WinUSB/libusb") and exits with code 3. On the first launch the app read "Connection reset" and never received the ERROR; the supervisor relaunched radiod and only the second attempt delivered it. Likely cause: the app sends OPEN_DEVICE and INIT back to back, radiod exits without reading INIT, and closing a socket with unread bytes is an abortive close (RST) on Windows, which can discard the ERROR already in flight.
 
-### Fix (proposed, not applied)
-In radiod, on a fatal error: write ERROR, then shutdown(SD_SEND) and drain the socket until EOF or a short timeout before closing it, so the app reads the ERROR first. Optionally, the supervisor could stop relaunching radiod after exit code 3 when the last error was a configuration error (device missing or not bound), since a restart cannot fix it.
+### Fix (applied and verified 2026-10-20)
+radiod now closes the socket gracefully on every exit path (closeSocketGracefully in radiod/src/main.cpp): shutdown(SD_SEND / SHUT_WR), then discard incoming bytes until EOF or 1 s (kCloseDrainMs), then close. Verified 3 out of 3 runs with an absent VID:PID (0bda:c812): the ERROR arrives on the first launch, the connection ends with a clean EOF instead of a reset, and radiod is not relaunched.
+Still open (optional): the supervisor schedules a relaunch after exit code 3 even for configuration errors (device missing or not bound); harmless today because the session stops before the backoff fires.
 
 ### Validated in the same run
 radiod.exe found at its default path, AF_UNIX socket on Windows, token handshake, devourer version embedded (357f04520ed4), structured ERROR decoding, and a clean shutdown (radiod killed, temp socket dir removed). radiod builds clean with VS Build Tools 2026 and libusb 1.0.30 from a standalone vcpkg (VCPKG_ROOT=C:\vcpkg); devourer submodule pinned at 357f045.

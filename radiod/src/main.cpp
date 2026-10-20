@@ -74,6 +74,7 @@ constexpr int kConnectAttempts = 10;
 constexpr int kConnectRetryMs = 200;
 constexpr int kHelloTimeoutMs = 5000;
 constexpr int kTickMs = 200;
+constexpr int kCloseDrainMs = 1000;
 constexpr auto kStatusInterval = std::chrono::seconds(1);
 
 volatile std::sig_atomic_t g_stopRequested = 0;
@@ -219,6 +220,44 @@ RecvStatus recvAll(Socket s, uint8_t* data, size_t size, bool eofAllowed) {
         received += static_cast<size_t>(n);
     }
     return RecvStatus::Ok;
+}
+
+/**
+ * Closes [s] so the app reads everything radiod sent before the connection goes away.
+ *
+ * A socket closed while it still holds unread incoming bytes (for example the INIT the app queues right behind an
+ * OPEN_DEVICE that fails fatally) is closed abortively: Windows answers with a reset, and the app's stack can drop the
+ * final ERROR before the app reads it. So radiod half-closes its sending side (the app then reads the last messages
+ * and an EOF), discards whatever the app still sends until the app closes too or [timeoutMs] passes, and only then
+ * closes the socket.
+ */
+void closeSocketGracefully(Socket s, int timeoutMs) {
+#if defined(_WIN32)
+    ::shutdown(s, SD_SEND);
+#else
+    ::shutdown(s, SHUT_WR);
+#endif
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    uint8_t discard[512];
+    for (;;) {
+        const auto left =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (left <= 0 || waitReadable(s, static_cast<int>(left)) <= 0) {
+            break;  // the app did not close in time, or the socket failed
+        }
+#if defined(_WIN32)
+        const int n = ::recv(s, reinterpret_cast<char*>(discard), static_cast<int>(sizeof(discard)), 0);
+#else
+        const ssize_t n = ::recv(s, discard, sizeof(discard), 0);
+        if (n < 0 && errno == EINTR) {
+            continue;
+        }
+#endif
+        if (n <= 0) {
+            break;  // EOF: the app closed its side too (or the connection is already gone)
+        }
+    }
+    closeSocket(s);
 }
 
 // =============================================================================================
@@ -717,7 +756,7 @@ int runRadiod(const Args& args) {
         }
         g_sender = nullptr;
     }
-    closeSocket(socket);
+    closeSocketGracefully(socket, kCloseDrainMs);
     return exitCode;
 }
 

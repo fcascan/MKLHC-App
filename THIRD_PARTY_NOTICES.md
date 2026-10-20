@@ -8,7 +8,7 @@ Every external origin the project draws on is listed below, with its repository,
 | --- | --- | --- | --- |
 | OpenKart SDK | https://github.com/OpenKart-SDK | BSD-3-Clause | LP2P access-point keys/IEs, RCD protocol, Fuji control/pairing logic and the installation-identity derivation (`openkartd/config.py`) are ported to Kotlin. |
 | mk-live | https://github.com/olus85/mk-live | MIT | Video (LSP/FRAM) reassembly, LVNI keepalive and event-channel responses are ported to Kotlin. |
-| devourer | https://github.com/OpenIPC/devourer | GPL-2.0-only | Userspace USB Wi-Fi driver, linked only inside the separate GPL-2.0 `radiod` helper process. |
+| devourer | https://github.com/OpenIPC/devourer | GPL-2.0-only | Userspace USB Wi-Fi driver, linked only inside the separate GPL-2.0 `radiod` helper process. Included as the git submodule `radiod/devourer`, pinned at commit `357f045` (2026-10-18); no devourer source is copied into radiod's own files. |
 | PixelPilot | https://github.com/OpenIPC/PixelPilot | GPL-3.0-only | Reference only for the Android USB-file-descriptor technique; no code copied. |
 | hostapd (static_ccmp_key patch) | https://github.com/OpenKart-SDK/hostapd | BSD-3-Clause | Static-CCMP access-point behaviour re-implemented; no code copied. |
 | libusb | https://github.com/libusb/libusb | LGPL-2.1-only | USB access used by `radiod`. |

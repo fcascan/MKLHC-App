@@ -11,18 +11,19 @@ AGPL-3.0 app; no devourer source is copied into radiod's own files.
 
 ## Status
 
-The code is written but has not been built against devourer or run on hardware: the machine it was written
-on had no libusb, so devourer was not fetched. What was checked without devourer, with MSVC on Windows:
+radiod builds against devourer `357f045` (2026-10-20, Visual Studio Build Tools 2026, libusb 1.0.30 from
+vcpkg). It has run end to end with the real binary but without a radio: the app spawns it, the AF_UNIX
+socket and the HELLO handshake work on Windows, and an OPEN_DEVICE failure reaches the app as an ERROR
+before radiod exits. Still to do in the Task 1.8 hardware spike: the first run with an adapter bound to
+WinUSB (radio up, beacon on air), then with the kart (association and DHCP).
+
+Earlier checks, made without devourer with MSVC on Windows, still hold:
 
 - `Ipc.cpp` against the byte vectors of the Kotlin `IpcCodecTest` (TX_FRAME, RX_FRAME, STATUS, header,
   SET_IDENTITY) plus round trips of all 14 messages and the strict-decode cases.
 - `main.cpp` with a stub `Radio` against a fake app over a real Windows AF_UNIX socket: HELLO handshake,
   command dispatch, READY / RX_FRAME / STATUS / LOG, bad token, bad version, malformed message, corrupt
   length, app closing the socket, SHUTDOWN.
-- `Radio.cpp` only type-checks against hand-written mock devourer headers.
-
-`Radio.cpp` therefore still needs its first real build, and radiod its first end-to-end run, in the Task 1.8
-hardware spike.
 
 ## Layout
 
@@ -35,15 +36,17 @@ hardware spike.
 
 ## Get devourer
 
-devourer is added by the repository author as a git submodule (radiod does not vendor it):
+devourer is a git submodule at `radiod/devourer` (radiod does not vendor it), pinned at `357f045`, the
+master of 2026-10-18 whose Jaguar2 support was checked for the TP-Link Archer T3U. After cloning
+MKLHC-App, fetch it with:
 
 ```
-git submodule add https://github.com/OpenIPC/devourer radiod/devourer
+git submodule update --init radiod/devourer
 ```
 
-No commit is pinned yet. Pin the commit that was verified in the Task 1.8 hardware spike
-(`git -C radiod/devourer rev-parse HEAD`, then commit the submodule pointer). radiod reports the short
-commit of the checkout to the app in READY.
+Do not add `--recursive`: devourer's own `reference/` submodules are vendor driver trees it needs only
+for its tests and generators; the code it builds is already vendored in its tree. radiod reports the
+short commit of the checkout to the app in READY.
 
 ## Build
 
@@ -54,8 +57,11 @@ cmake -S radiod -B radiod/build
 cmake --build radiod/build --config Release
 ```
 
-Windows: install libusb with vcpkg (`vcpkg install libusb pkgconf`), set `VCPKG_ROOT`, and configure from a
-developer prompt for the MSVC toolchain (or use MSYS2 UCRT64, where devourer takes libusb from pkg-config).
+Windows: install libusb with a standalone vcpkg (`vcpkg install libusb pkgconf --triplet x64-windows`; the
+vcpkg bundled with Visual Studio works only in manifest mode), set `VCPKG_ROOT`, and configure from the x64
+Native Tools Command Prompt of Visual Studio Build Tools 2026, whose CMake has the Visual Studio 2026
+generator (the CMake shipped with the Android SDK does not; with it, add `-G Ninja`). MSYS2 UCRT64 also
+works, where devourer takes libusb from pkg-config.
 `CMakeLists.txt` loads the vcpkg toolchain before `project()` when `VCPKG_ROOT` is set. The adapter must be
 bound to WinUSB (for example with Zadig) or libusb cannot open it. With a dynamic vcpkg triplet,
 `libusb-1.0.dll` must sit next to `radiod.exe`.
@@ -93,12 +99,19 @@ The wire format is documented in `src/Ipc.h`. Behavior that is radiod's own choi
 - STATUS `beacons` counts successful beacon loads (START_BEACON plus UPDATE_BEACON); the hardware does not
   report how many beacons it aired.
 - Always send SHUTDOWN (or close the socket) and let radiod exit: the chip keeps beaconing after the host
-  process dies, and a hard kill gives radiod no chance to stop it.
+  process dies, and a hard kill gives radiod no chance to stop it. On Jaguar2 (RTL8822BU / RTL8812BU)
+  devourer has no power-down at teardown either, so after a hard kill the beacon stays on air until the
+  adapter is unplugged.
+- On exit radiod half-closes the socket and drains it for up to a second before closing, so the app always
+  reads the last messages, including the ERROR of a fatal failure. A plain close with unread bytes from the
+  app would be a reset on Windows, which can drop that ERROR.
 
 ## Hardware spike checklist (Task 1.8)
 
-1. Add the submodule and pin it (above); install libusb and pkg-config; build.
+1. Fetch the submodule (above); install libusb and pkg-config; build.
 2. Bind the adapter to WinUSB with Zadig; note its VID:PID.
-3. Verify the API assumptions marked in `Radio.cpp` compile and behave: `CreateRadio` with a real `libusb_context`,
-   `rssi[0]` units (dBm or percent), `SetAckResponder` versus the beacon BSSID, 40/80 MHz `ChannelOffset`.
+3. Verify the API assumptions marked in `Radio.cpp` behave on hardware (they compile against devourer
+   `357f045`): `CreateRadio` with a real `libusb_context`, `rssi[0]` units (dBm or percent), 40/80 MHz
+   `ChannelOffset`. `SetAckResponder` before `StartBeacon` is safe on Jaguar2: devourer only refuses a
+   beacon while a station identity owns port 0, which `SetAckResponder` does not arm.
 4. Run the app (or a stub server) and confirm HELLO, READY, RX_FRAME, STATUS and a beacon on air.
