@@ -24,6 +24,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
 import java.io.OutputStream
 import java.nio.file.Files
 import java.nio.file.Path
@@ -32,7 +33,8 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.CountDownLatch
 
 /*
- * The spike's composition: the process-level wiring around SpikeRunner (radiod, the socket, the pcap file, shutdown).
+ * The spike's composition: the process-level wiring around SpikeRunner (radiod, the socket, the pcap file, the QR
+ * image, shutdown).
  *
  * Original code; it only starts the pieces that already exist (DesktopRadioLink and RadiodSupervisor from :core:radio,
  * SpikePairing and SpikeRunner from this package) and tears them down in the order radiod needs.
@@ -53,10 +55,11 @@ internal class StopRequest(val reason: String, val failed: Boolean)
 /**
  * Runs the whole spike session and returns the process exit code.
  *
- * Business logic: in order, it resolves radiod, creates a fresh pairing network and prints its QR payload, opens the
- * pcap file, listens on a socket in a short temporary directory, starts [SpikeRunner] and the radiod supervisor, and
- * brings the radio up every time radiod connects (so a radiod restart re-arms the beacon). Then it waits for [stop].
- * Cleanup always runs: the runner stops the beacon and asks radiod to shut down, the supervisor is stopped once radiod
+ * Business logic: in order, it resolves radiod, creates a fresh pairing network, saves its QR code as an SVG image next
+ * to the capture and prints the QR payload and the image path, opens the pcap file, listens on a socket in a short
+ * temporary directory, starts [SpikeRunner] and the radiod supervisor, and brings the radio up every time radiod
+ * connects (so a radiod restart re-arms the beacon). Then it waits for [stop]. Cleanup always runs: the QR image is
+ * deleted first, then the runner stops the beacon and asks radiod to shut down, the supervisor is stopped once radiod
  * has exited by itself (so it does not launch it again), and the socket and its directory are removed.
  *
  * Everything that touches the access point runs on one single-threaded dispatcher, as [SpikeRunner] requires.
@@ -84,6 +87,9 @@ internal suspend fun runSpikeSession(
     // Held so the outer finally can always remove it and release the shutdown hook, even if setup throws before the
     // capture starts; otherwise the hook would block for SHUTDOWN_WAIT_MS and the temp directory would leak.
     var workDir: Path? = null
+    // The QR image holds this run's pairing seed and is useless once the run ends (the network is gone), so it is
+    // removed as soon as the run starts stopping, or by the outer finally if setup fails before the capture starts.
+    var qrImage: Path? = null
     try {
         val radiod = args.radiod ?: findRadiodExecutable()
         if (radiod == null || !Files.isRegularFile(radiod)) {
@@ -93,10 +99,15 @@ internal suspend fun runSpikeSession(
         }
 
         val pairing = createSpikePairing(primitives, nonceTable, args.channel, args.beaconIntervalTu)
-        printPairing(pairing, args, console, onAir = false)
 
         Files.createDirectories(args.outDir)
-        val pcapPath = args.outDir.resolve("spike-${LocalDateTime.now().format(FILE_TIME_FORMAT)}.pcap")
+        val fileStem = "spike-${LocalDateTime.now().format(FILE_TIME_FORMAT)}"
+        val pcapPath = args.outDir.resolve("$fileStem.pcap")
+        val qrPath = args.outDir.resolve("$fileStem-qr.svg")
+        qrImage = qrPath
+        Files.writeString(qrPath, renderQrAsSvg(encodeQrMatrix(pairing.qrPayload)))
+        printPairing(pairing, qrPath, args, console, onAir = false)
+
         // AF_UNIX socket paths are limited to about 100 bytes, so bind in a short temporary directory.
         val dir = Files.createTempDirectory(WORK_DIR_PREFIX)
         workDir = dir
@@ -130,7 +141,7 @@ internal suspend fun runSpikeSession(
                 link.listen()
                 runner.start(scope)
                 supervisor.start()
-                armBringUp(scope, link, runner, stop) { printPairing(pairing, args, console, onAir = true) }
+                armBringUp(scope, link, runner, stop) { printPairing(pairing, qrPath, args, console, onAir = true) }
                 if (args.durationSeconds > 0) {
                     scope.launch {
                         delay(args.durationSeconds * MILLIS_PER_SECOND)
@@ -143,6 +154,10 @@ internal suspend fun runSpikeSession(
                 log.i { "runSpikeSession(): stopping -> reason=${request.reason} failed=${request.failed}" }
                 if (request.failed) EXIT_RADIO_FAILED else EXIT_OK
             } finally {
+                // The QR image goes first: it is not needed once the run is stopping, and the radio teardown below can
+                // take seconds, during which a hard kill would leave the seed-bearing file behind.
+                qrImage?.let { image -> deleteQrImage(image, console) }
+                qrImage = null
                 // On the runner's own dispatcher, as SpikeRunner requires, and even if this coroutine was cancelled.
                 withContext(NonCancellable + dispatcher) {
                     runner.stop()
@@ -160,6 +175,7 @@ internal suspend fun runSpikeSession(
         }
     } finally {
         workDir?.let { dir -> runCatching { Files.deleteIfExists(dir) } }
+        qrImage?.let { image -> deleteQrImage(image, console) }
         cleanupDone.countDown()
     }
 }
@@ -200,16 +216,17 @@ private fun armBringUp(
 }
 
 /**
- * Prints the pairing network and its QR payload. The payload (which contains the seed) is exactly what the QR code
- * shows to the kart's camera; it is printed to the console on purpose, never to the log.
+ * Prints the pairing network, its QR payload and where the QR image is. The payload (which contains the seed) is
+ * exactly what the QR code shows to the kart's camera; it is printed to the console on purpose, never to the log.
  *
  * It is printed twice: at start-up, while the radio is still coming up (the network does not exist yet, so the kart
  * must not scan it then), and again once the beacon is on air, so the code to scan is the last thing on screen
  * instead of being pushed out of view by the bring-up log.
  *
+ * @param qrImage the SVG file of the same QR code, for a console that cannot draw it (see [renderQrAsSvg]).
  * @param onAir true once the pairing beacon is on air.
  */
-private fun printPairing(pairing: SpikePairing, args: SpikeArgs, console: (String) -> Unit, onAir: Boolean) {
+private fun printPairing(pairing: SpikePairing, qrImage: Path, args: SpikeArgs, console: (String) -> Unit, onAir: Boolean) {
     val config = pairing.apConfig
     val payload = pairing.qrPayload
     if (onAir) {
@@ -222,10 +239,24 @@ private fun printPairing(pairing: SpikePairing, args: SpikeArgs, console: (Strin
     if (args.showQr) {
         console(renderQrForConsole(encodeQrMatrix(payload), darkTerminal = !args.lightTerminal))
     }
+    // As a file URI: plain ASCII, so a non-ASCII path survives the same console code page the image works around.
+    console("Pairing QR image (open it in a browser if the console code is missing or unreadable): ${qrImage.toAbsolutePath().toUri()}")
     if (onAir) {
         console("Put the kart in pairing mode (front LEDs blinking) and point its camera at the QR code.")
     } else {
         console("Wait: the radio is coming up (about a minute on Windows). The QR code is printed again once the network is on air; scan that one.")
+    }
+}
+
+/**
+ * Deletes the run's QR image. A failure (on Windows, a viewer that still holds the file open) is reported on the
+ * console with the path, so the seed-bearing file can be removed by hand; the path itself holds no secret.
+ */
+private fun deleteQrImage(image: Path, console: (String) -> Unit) {
+    try {
+        Files.deleteIfExists(image)
+    } catch (failure: IOException) {
+        console("warning: could not delete the QR image, which holds this run's pairing seed; delete it by hand: ${image.toAbsolutePath()}")
     }
 }
 

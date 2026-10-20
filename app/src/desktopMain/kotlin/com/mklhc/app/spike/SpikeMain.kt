@@ -22,7 +22,8 @@ import kotlin.system.exitProcess
  */
 
 /**
- * Starts the spike: launches radiod, hosts a pairing network, prints the pairing QR payload and writes a decrypted pcap.
+ * Starts the spike: launches radiod, hosts a pairing network, prints the pairing QR payload, saves the QR code as an
+ * image and writes a decrypted pcap.
  *
  * Business logic: this is the GO/NO-GO run of Phase 1. `main` only parses the command line and exits with the
  * result; [runSpikeSession] wires DesktopRadioLink (the socket radiod connects to), RadiodSupervisor (keeps the radiod
@@ -161,11 +162,11 @@ private val SPIKE_USAGE = """
       --channel <1|6|11>     Wi-Fi channel (default $DEFAULT_CHANNEL)
       --tx-power <0..255>    TX power index; 0 keeps the chip default (default 0)
       --beacon-interval <n>  beacon interval in time units of 1024 us (default ${ApConfig.DEFAULT_BEACON_INTERVAL_TU})
-      --out <dir>            directory for the pcap (default $DEFAULT_OUT_DIR)
+      --out <dir>            directory for the pcap and the QR image (default $DEFAULT_OUT_DIR)
       --duration <seconds>   stop after this long; 0 runs until Enter or Ctrl+C (default 0)
       --ready-timeout <s>    seconds to wait for the radio to come up (default ${SpikeOptions.DEFAULT_READY_TIMEOUT_MS / MILLIS_PER_SECOND})
       --verbose              debug logging, including radiod's own output
-      --no-qr                do not draw the QR code (the payload hex is still printed)
+      --no-qr                do not draw the QR code in the console (the payload hex and the QR image are still produced)
       --light-terminal       draw the QR code for a light terminal background
       --help                 show this text
 """.trimIndent()

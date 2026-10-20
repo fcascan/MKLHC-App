@@ -1,11 +1,18 @@
 package com.mklhc.app.spike
 
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.ResultMetadataType
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
 import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.kart_protocol.pairing.PAIRING_PAYLOAD_SIZE
 import com.mklhc.core.kart_protocol.pairing.PAIRING_SEED_SIZE
+import com.mklhc.core.kart_protocol.pairing.encodePairingPayload
 import com.mklhc.core.wifi_ap.lp2p.Lp2pKeys
 import com.mklhc.core.wifi_ap.lp2p.NonceTable
 import com.mklhc.feature.pairing.presentation.qr.QrMatrix
+import com.mklhc.feature.pairing.presentation.qr.encodeQrMatrix
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -15,9 +22,10 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
- * [createSpikePairing] and [renderQrForConsole]: the pairing network the spike beacons must be exactly the one its
- * QR payload describes (seed, SSID, channel, and a CCMP key derived from `SHA-256(seed)`), and the console QR must
- * draw the module grid with the half-block characters in the right polarity.
+ * [createSpikePairing], [renderQrForConsole] and [renderQrAsSvg]: the pairing network the spike beacons must be exactly
+ * the one its QR payload describes (seed, SSID, channel, and a CCMP key derived from `SHA-256(seed)`), the console QR
+ * must draw the module grid with the half-block characters in the right polarity, and the SVG image must scan back to
+ * the payload.
  */
 class SpikePairingTest {
 
@@ -151,5 +159,82 @@ class SpikePairingTest {
         // 33 modules + 2 * 4 quiet zone = 41 rows, two per text line.
         assertEquals(21, lines.size)
         assertTrue(lines.all { it.length == 41 })
+    }
+
+    // ---- SVG QR --------------------------------------------------------------------------------
+
+    @Test
+    fun theSvgDrawsEachRunOfDarkModulesAsOneRectangleOffsetByTheQuietZone() {
+        // Row 0: dark, dark, light. Row 1: all light. Row 2: dark, light, dark.
+        val matrix = QrMatrix(3, booleanArrayOf(true, true, false, false, false, false, true, false, true))
+
+        val svg = renderQrAsSvg(matrix, quietZone = 1, modulePixels = 5)
+
+        // 3 modules + 2 * 1 quiet zone = 5 modules a side, 25 pixels.
+        assertTrue(svg.contains("width=\"25\" height=\"25\" viewBox=\"0 0 5 5\""), svg)
+        assertTrue(svg.contains("<rect width=\"5\" height=\"5\" fill=\"#ffffff\"/>"), svg)
+        assertTrue(svg.contains("<path fill=\"#000000\" d=\"M1 1h2v1h-2zM1 3h1v1h-1zM3 3h1v1h-1z\"/>"), svg)
+    }
+
+    @Test
+    fun theSvgOfARealPayloadScansBackToThePayload() {
+        // A fixed payload with the real layout, so a failing scan can be reproduced.
+        val payload = encodePairingPayload(ByteArray(PAIRING_SEED_SIZE) { (0x5A + it * 31).toByte() }, "mklhc-pair_AbCdEfGhIjKlMnOp", 6)
+        val svg = renderQrAsSvg(encodeQrMatrix(payload))
+
+        // 33 modules + 2 * 4 quiet zone = 41 modules at 10 pixels: one white square under one black path.
+        assertEquals(
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="410" height="410" viewBox="0 0 41 41" shape-rendering="crispEdges">
+            <rect width="41" height="41" fill="#ffffff"/>
+            <path fill="#000000" d=""/>
+            </svg>
+            """.trimIndent() + "\n",
+            svg.replace(Regex(" d=\"[^\"]*\""), " d=\"\""),
+        )
+        val scanned = QRCodeReader().decode(BinaryBitmap(HybridBinarizer(rasterize(svg, pixelsPerModule = 4))))
+
+        @Suppress("UNCHECKED_CAST")
+        val segments = scanned.resultMetadata[ResultMetadataType.BYTE_SEGMENTS] as List<ByteArray>
+        assertContentEquals(payload, segments.single())
+    }
+
+    @Test
+    fun theSvgRejectsANegativeQuietZoneOrAnEmptyModule() {
+        assertFailsWith<IllegalArgumentException> { renderQrAsSvg(checker, quietZone = -1) }
+        assertFailsWith<IllegalArgumentException> { renderQrAsSvg(checker, modulePixels = 0) }
+    }
+
+    /**
+     * Paints the SVG the way a viewer would, from the file text alone: the view box gives the side in modules, the
+     * background is white (the caller checks the rest of the document), and every `M x y h w v1 h-w z` rectangle of
+     * the single path is black.
+     */
+    private fun rasterize(svg: String, pixelsPerModule: Int): RGBLuminanceSource {
+        val modules = checkNotNull(Regex("viewBox=\"0 0 (\\d+) \\1\"").find(svg)) { "no square view box in:\n$svg" }
+            .groupValues[1].toInt()
+        val side = modules * pixelsPerModule
+        val pixels = IntArray(side * side) { WHITE }
+        assertEquals(1, Regex("<path ").findAll(svg).count(), "a single path")
+        val path = checkNotNull(Regex("<path fill=\"#000000\" d=\"([^\"]*)\"/>").find(svg)) { "no path in:\n$svg" }
+            .groupValues[1]
+        val rectangles = Regex("M(\\d+) (\\d+)h(\\d+)v1h-\\3z").findAll(path).toList()
+        assertEquals(path, rectangles.joinToString("") { it.value }, "the path holds only module-row rectangles")
+        for (rectangle in rectangles) {
+            val (x, y, width) = rectangle.destructured.let { (left, top, run) -> Triple(left.toInt(), top.toInt(), run.toInt()) }
+            assertTrue(x + width <= modules && y < modules, "rectangle ${rectangle.value} is outside the $modules-module view box")
+            for (py in y * pixelsPerModule until (y + 1) * pixelsPerModule) {
+                for (px in x * pixelsPerModule until (x + width) * pixelsPerModule) {
+                    pixels[py * side + px] = BLACK
+                }
+            }
+        }
+        return RGBLuminanceSource(side, side, pixels)
+    }
+
+    private companion object {
+        const val WHITE = 0xFFFFFFFF.toInt()
+        const val BLACK = 0xFF000000.toInt()
     }
 }

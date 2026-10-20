@@ -54,6 +54,8 @@ kotlin {
             implementation(compose.uiTest)
             // LocalLifecycleOwner, which the test host provides to the navigation graph.
             implementation(libs.jetbrains.lifecycle.runtime.compose)
+            // Scans the spike's SVG pairing QR code back, as the kart's camera would.
+            implementation(libs.zxing.core)
         }
     }
 }

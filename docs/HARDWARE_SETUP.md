@@ -110,29 +110,31 @@ Options go through `--args` (quote paths that contain spaces):
 | `--channel <1\|6\|11>` | Wi-Fi channel (default 6). |
 | `--tx-power <0..255>` | TX power index; 0 keeps the chip default. Use a level that is legal where you are. |
 | `--beacon-interval <n>` | Beacon interval in time units of 1024 microseconds (default 100). |
-| `--out <dir>` | Where the capture is written (default `spike-captures/`). |
+| `--out <dir>` | Where the capture and the QR image are written (default `spike-captures/`). |
 | `--duration <seconds>` | Stop after this long; 0 runs until you press Enter (default 0). |
 | `--ready-timeout <seconds>` | How long to wait for the radio to come up before giving up (default 120). |
 | `--verbose` | Debug logging, including `radiod`'s own output. |
-| `--no-qr`, `--light-terminal` | Skip drawing the QR code, or draw it for a light terminal background. |
+| `--no-qr`, `--light-terminal` | Skip drawing the QR code in the console (the QR image file is still written), or draw it for a light terminal background. |
 
 The program then:
 
 1. Starts `radiod`, opens the adapter and starts the hardware beacon of a fresh **pairing network** (a hidden network
    whose name starts with `mklhc-pair_`, with a random key every run).
-2. Prints the pairing QR payload (62 bytes, in hex) and draws the QR code in the console, then prints both again under
-   `=== The pairing network is on air ... ===` once the beacon is up: scan that second one, since the network does
+2. Prints the pairing QR payload (62 bytes, in hex), draws the QR code in the console and saves it as an image next
+   to the capture (`spike-<date>-<time>-qr.svg`, path printed as `Pairing QR image`), then prints all of it again under
+   `=== The pairing network is on air ... ===` once the beacon is up: scan the code only then, since the network does
    not exist before. The payload contains the pairing seed, so treat it like the QR code on a screen: anyone who can
-   see it can join that one-run network.
+   see it can join that one-run network. The image is deleted as soon as the spike starts stopping; a hard kill
+   leaves it behind, so delete it by hand then (the spike also prints a warning if it cannot delete it).
 3. Waits for the kart, and answers its authentication, association and DHCP messages.
 
 Once the on-air banner appears, put the kart into pairing mode (front LEDs blinking) and point its camera at the QR
-code printed under it. A dark
-terminal background gives the right polarity by default; on a light background use `--light-terminal`. If the console
-shows `?` or other garbled characters instead of a square, the output went through a console that cannot print the block
-characters (under Gradle on Windows the console uses the ANSI code page). Then render the printed hex payload yourself as
-a QR code in byte mode at error-correction level M with a tool that runs on your computer. Never paste it into an online
-generator: the payload holds the pairing seed of the run.
+code printed under it. A dark terminal background gives the right polarity by default; on a light background use
+`--light-terminal`. If the console shows `?` or other garbled characters instead of a square, the output went through a
+console that cannot print the block characters (under Gradle on Windows the console uses the ANSI code page). Then open
+the `Pairing QR image` file in a browser or image viewer on the same computer and show that to the kart instead; it is
+always dark on light. Never upload the image or paste the hex payload into an online QR tool: both hold the pairing seed
+of the run.
 
 Press **Enter** to stop (or use `--duration`). Stopping asks `radiod` to shut the radio down, which also stops the
 beacon.
@@ -178,8 +180,8 @@ bit is cleared and the encryption header is removed), plus the DHCP reply the ap
 - **A.** The kart associates with the pairing network (`auth` and `assoc` with `retry=0`).
 - **B.** The app decrypts the kart's DHCP DISCOVER and the exported capture shows it in plaintext.
 
-The capture contains the kart's traffic. Keep it out of the repository (`spike-captures/` and `*.pcap` are ignored by
-git) and do not share it without looking at it first.
+The capture contains the kart's traffic. Keep it out of the repository (`spike-captures/`, `*.pcap` and the
+`spike-*-qr.svg` images are ignored by git) and do not share it without looking at it first.
 
 ### If it does not work
 

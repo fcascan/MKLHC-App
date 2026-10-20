@@ -183,9 +183,10 @@ Running `./gradlew :app:runSpike` in a Windows console (PowerShell 5.1 in the ap
 ### Workaround used for the GO run
 A local page rendered the same 62-byte payload: qrcode-generator (byte mode, error correction M) drew it on a canvas and jsQR decoded the canvas back to check it byte for byte. It was served with `python -m http.server --bind 127.0.0.1` from a folder holding only that page, because the app's browser pane shows file:// pages as static snapshots without JavaScript. The page lives in the git-ignored .ia-docs/qr/ and holds a one-run pairing seed only.
 
-### Proposed fix (not applied)
-Have the spike write the QR code itself as an SVG or HTML file (rectangles drawn from encodeQrMatrix, no JavaScript and no network) next to the pcap and print its path, keeping the console drawing for UTF-8 terminals. Setting `chcp 65001` and a UTF-8 stdout for the Gradle client may also work but depends on the user's console.
+### Fix (applied)
+The spike now writes the same code as `spike-<date>-<time>-qr.svg` next to the pcap (renderQrAsSvg in SpikePairing.kt: dark modules as path rectangles on a white background, 4-module quiet zone, 10 px per module, no script and no network) and prints its path as a file URI (plain ASCII, so it survives the same code page) under the payload in both pairing printouts, whether or not `--no-qr` is set. The console drawing stays for UTF-8 terminals. The image holds the run's seed, so the session deletes it first thing when the run starts stopping (before the radio teardown, which can take seconds) and again in the outer finally for setup failures; a failed delete (a viewer holding the file on Windows) prints a warning with the path. A hard kill leaves it, so `spike-*-qr.svg` is git-ignored too. SpikePairingTest rasterizes the SVG text of a fixed payload and scans it back with ZXing's QRCodeReader to the exact octets; SpikeSessionTest checks the file, the printed path, `--no-qr` and the deletion. Setting `chcp 65001` and a UTF-8 stdout for the Gradle client may also work but depends on the user's console, so it was not pursued.
 
 ### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikePairing.kt
 - app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeSession.kt
 - docs/HARDWARE_SETUP.md

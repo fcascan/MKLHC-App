@@ -136,6 +136,55 @@ internal fun renderQrForConsole(matrix: QrMatrix, darkTerminal: Boolean = true, 
     return text.toString()
 }
 
+/**
+ * Draws [matrix] as an SVG image: black modules on a white background, quiet zone included.
+ *
+ * Business logic: the console drawing needs a terminal that can print the half-block characters, and under Gradle on
+ * Windows the console uses the ANSI code page, which prints `?` instead. So the spike also saves the code as an image
+ * file next to the capture, to show to the kart from any browser or image viewer on the same computer: plain shapes,
+ * no script and no network. The polarity is always dark on light, as the QR standard draws it. Each run of dark
+ * modules in a row becomes one rectangle of a single path, in module units; the view box scales it to
+ * [modulePixels] per module and `crispEdges` keeps the module edges sharp.
+ *
+ * @param matrix the code without a quiet zone.
+ * @param quietZone the light border, in modules, drawn around the code; the QR standard asks for 4.
+ * @param modulePixels the displayed size of one module, in pixels.
+ */
+internal fun renderQrAsSvg(
+    matrix: QrMatrix,
+    quietZone: Int = QR_QUIET_ZONE_MODULES,
+    modulePixels: Int = SVG_MODULE_PIXELS,
+): String {
+    require(quietZone >= 0) { "the quiet zone cannot be negative: quietZone=$quietZone" }
+    require(modulePixels > 0) { "a module must be at least one pixel: modulePixels=$modulePixels" }
+    val total = matrix.size + 2 * quietZone
+    val pixels = total * modulePixels
+
+    val path = StringBuilder()
+    for (y in 0 until matrix.size) {
+        var x = 0
+        while (x < matrix.size) {
+            if (!matrix[x, y]) {
+                x++
+                continue
+            }
+            val start = x
+            while (x < matrix.size && matrix[x, y]) x++
+            val run = x - start
+            path.append("M${start + quietZone} ${y + quietZone}h${run}v1h-${run}z")
+        }
+    }
+
+    return buildString {
+        append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+        append("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"$pixels\" height=\"$pixels\" ")
+        append("viewBox=\"0 0 $total $total\" shape-rendering=\"crispEdges\">\n")
+        append("<rect width=\"$total\" height=\"$total\" fill=\"#ffffff\"/>\n")
+        append("<path fill=\"#000000\" d=\"$path\"/>\n")
+        append("</svg>\n")
+    }
+}
+
 // TODO(KartRadioAp): these duplicate the production pairing-SSID rule in KartSessionRepository (design 8.5). When the
 // real AP is implemented, promote the prefix/size (and the PairingNetwork -> ApConfig derivation) to one shared place
 // (next to encodePairingPayload) so the spike and the real session cannot drift.
@@ -144,6 +193,7 @@ private const val SSID_RANDOM_BYTES = 12
 private const val GROUP_BIT_CLEAR_MASK = 0xFE
 private const val LOCALLY_ADMINISTERED_BIT = 0x02
 private const val QR_QUIET_ZONE_MODULES = 4
+private const val SVG_MODULE_PIXELS = 10
 private const val FULL_BLOCK = '\u2588'
 private const val UPPER_HALF_BLOCK = '\u2580'
 private const val LOWER_HALF_BLOCK = '\u2584'

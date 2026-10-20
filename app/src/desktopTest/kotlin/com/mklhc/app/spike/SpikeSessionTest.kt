@@ -12,6 +12,7 @@ import com.mklhc.core.wifi_ap.lp2p.Lp2pKeys
 import com.mklhc.core.wifi_ap.lp2p.NonceTable
 import com.mklhc.core.wifi_ap.mac.Ieee80211Frame
 import com.mklhc.core.wifi_ap.mac.MacAddress
+import com.mklhc.feature.pairing.presentation.qr.encodeQrMatrix
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -104,18 +105,26 @@ class SpikeSessionTest {
         assertTrue(console.text().contains("The pairing network is on air"), "the QR code is printed again once on air")
         assertEquals(2, console.text().lines().count { it.startsWith("Pairing QR payload") })
 
+        // The same code is saved as an SVG image next to the capture, and its path is printed with the payload.
+        val qrImage = Files.list(outDir).use { files -> files.toList() }.single { it.fileName.toString().endsWith(".svg") }
+        assertTrue(qrImage.fileName.toString().matches(Regex("spike-\\d{8}-\\d{6}-qr\\.svg")), qrImage.toString())
+        assertEquals(renderQrAsSvg(encodeQrMatrix(payload)), Files.readString(qrImage))
+        assertEquals(2, console.text().lines().count { it.startsWith("Pairing QR image") && it.endsWith(qrImage.toAbsolutePath().toUri().toString()) })
+
         // Stopping tears everything down in order and succeeds.
         stop.complete(StopRequest("test finished", failed = false))
         assertEquals(EXIT_OK, session.await())
+        assertFalse(Files.exists(qrImage), "the QR image, which holds the run's seed, is removed at stop")
 
         val afterBeacon = radiod.messages().dropWhile { it !is RadioMessage.StartBeacon }.drop(1).filter { it !is RadioMessage.TxFrame }
         assertEquals(listOf<RadioMessage>(RadioMessage.StopBeacon, RadioMessage.Shutdown), afterBeacon)
         assertEquals(1, launcher.processes.size, "radiod exited by itself after SHUTDOWN and was not launched again")
         assertFalse(Files.exists(launcher.configs.single().socketPath.parent), "the socket and its directory are removed")
 
-        // The pcap on disk is valid, radiotap, and holds the decrypted DISCOVER.
+        // The pcap on disk is valid, radiotap, and holds the decrypted DISCOVER; it shares the QR image's name stem.
         val pcapFile = Files.list(outDir).use { files -> files.toList() }.single()
         assertTrue(pcapFile.fileName.toString().matches(Regex("spike-\\d{8}-\\d{6}\\.pcap")), pcapFile.toString())
+        assertEquals(qrImage.fileName.toString().removeSuffix("-qr.svg"), pcapFile.fileName.toString().removeSuffix(".pcap"))
         val capture = parsePcap(Files.readAllBytes(pcapFile))
         assertEquals(127, capture.linkType)
         assertEquals(6, capture.frames.size, "auth req/resp, assoc req/resp, DISCOVER, OFFER")
@@ -139,7 +148,7 @@ class SpikeSessionTest {
         val radiod = launcher.processes.single()
         assertTrue(radiod.messages().any { it is RadioMessage.Shutdown }, "cleanup still shuts radiod down")
         assertTrue(radiod.messages().none { it is RadioMessage.StartBeacon }, "no beacon after a failed bring-up")
-        // The pcap file exists and is a valid, empty capture.
+        // The pcap file exists and is a valid, empty capture; the QR image was removed, so it is the only file left.
         val pcapFile = Files.list(outDir).use { files -> files.toList() }.single()
         assertEquals(0, parsePcap(Files.readAllBytes(pcapFile)).frames.size)
     }
@@ -173,6 +182,23 @@ class SpikeSessionTest {
 
         assertEquals(EXIT_OK, code)
         assertTrue(launcher.processes.single().messages().any { it is RadioMessage.Shutdown })
+    }
+
+    @Test
+    fun withNoQrTheConsoleCodeIsSkippedButTheImageIsStillWrittenAndPrinted() = sessionTest {
+        val console = ConsoleCapture()
+        val stop = CompletableDeferred<StopRequest>()
+        val session = async(Dispatchers.Default) { runSpikeSession(args().copy(showQr = false), stop, launcher = launcher, nonceTable = knownNonceTable(), console = console::add) }
+        launcher.awaitProcess(0).awaitMessages<RadioMessage.StartBeacon>(1)
+
+        assertFalse(console.text().any { it == '█' || it == '▀' || it == '▄' }, "no QR code is drawn in the console")
+        val qrImage = Files.list(outDir).use { files -> files.toList() }.single { it.fileName.toString().endsWith(".svg") }
+        assertEquals(renderQrAsSvg(encodeQrMatrix(console.qrPayload())), Files.readString(qrImage))
+        assertTrue(console.text().lines().any { it.startsWith("Pairing QR image") && it.endsWith(qrImage.toAbsolutePath().toUri().toString()) })
+
+        stop.complete(StopRequest("test finished", failed = false))
+        assertEquals(EXIT_OK, session.await())
+        assertFalse(Files.exists(qrImage), "the QR image is removed at stop")
     }
 
     @Test
