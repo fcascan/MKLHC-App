@@ -34,8 +34,9 @@ import kotlin.random.Random
  *   are dropped) and then filtered to packets addressed to us or to the limited broadcast address;
  *   anything else is dropped with a debug log.
  * - By IP protocol: UDP to port 67 feeds the built-in [DhcpServer] and its reply goes back as UDP
- *   67 -> 68 from [NetstackConfig.ourIp] (to 255.255.255.255 when the client set the broadcast flag
- *   or the reply is a NAK, otherwise to the leased address, RFC 2131 section 4.1); UDP to any other
+ *   67 -> 68 from [NetstackConfig.ourIp] (to 255.255.255.255 while the client has no address yet,
+ *   when it set the broadcast flag, or for a NAK, as BusyBox udhcpd does; unicast to the leased
+ *   address only for a client that already has one, a renewal); UDP to any other
  *   port goes to the [UdpEndpoint] bound by [bindUdp]; TCP unicast to us goes to [tcp]; every other
  *   protocol is dropped.
  * - Outbound, [tcp] and the UDP endpoints wrap their segments and datagrams in IPv4 from
@@ -298,9 +299,12 @@ class NetstackNode(
             return
         }
         val reply = dhcpServer.handle(request) ?: return
-        // RFC 2131 section 4.1: a NAK, or a reply to a client that set the broadcast flag, is broadcast;
-        // otherwise it is unicast to the leased address (the link has one station, so no link address is needed).
-        val toBroadcast = reply.isBroadcast || reply.messageType == DhcpMessageType.NAK
+        // Like BusyBox udhcpd (the server OpenKart runs for the kart), not the letter of RFC 2131 section 4.1: a reply
+        // is broadcast while the client has no address yet (ciaddr 0), whatever its broadcast flag, and for a NAK;
+        // only a client that already has an address (a renewal) gets it unicast. Seen on hardware (2026-10-20): the
+        // kart clears the broadcast flag but ignores an OFFER unicast to the offered address, repeating its DISCOVER;
+        // broadcast, it sends its REQUEST and takes the lease. The link has one station, so no link address is needed.
+        val toBroadcast = reply.isBroadcast || reply.messageType == DhcpMessageType.NAK || reply.clientIp == Ipv4Address.ANY
         val destination = if (toBroadcast) Ipv4Address.BROADCAST else reply.yourIp
         log.i { "dispatchDhcp(): answering -> type=${reply.messageType} destination=$destination xid=${reply.xid.toUInt().toString(HEX_RADIX)}" }
         sendUdp(destination, DhcpServer.SERVER_PORT, DhcpServer.CLIENT_PORT, reply.encode())

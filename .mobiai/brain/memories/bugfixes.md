@@ -147,3 +147,45 @@ radiod.exe found at its default path, AF_UNIX socket on Windows, token handshake
 ### Files
 - radiod/src/main.cpp
 - core/radio/src/desktopMain/kotlin/com/mklhc/core/radio/RadiodSupervisor.kt
+
+## DHCP replies must be broadcast while the client has no address (udhcpd rule)
+
+- id: dhcp-replies-must-be-broadcast-while-the-client-has-no-addre-20261020-195342
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Problem
+On hardware (2026-10-20) the kart associated and sent its DHCP DISCOVER with the broadcast flag clear (flags 0x0000). Following RFC 2131 section 4.1 the server unicast the OFFER to the offered address (169.254.98.66). The kart never sent a REQUEST: it repeated the DISCOVER about ten times, sometimes sent a DECLINE with zero addresses, then deauthenticated and started over. The OFFER was well formed (IP and UDP checksums correct, options 53/54/51/1) and reached the kart as a unicast 802.11 frame.
+
+### Fix (applied and verified)
+Do what BusyBox udhcpd does (OpenKart runs it for the kart): send every reply to 255.255.255.255 while the client has no address yet (the reply's ciaddr is 0.0.0.0), whatever the broadcast flag, plus every NAK; unicast to the leased address only for a renewal (ciaddr set). At the 802.11 level the frame stays unicast to the station, since there is no group key. Applied in SpikeRunner.sendDhcpReply and NetstackNode.dispatchDhcp, documented in DhcpServer, and NetstackNodeTest now pins a flag-less DISCOVER and REQUEST getting a broadcast OFFER and ACK. On hardware the kart then sent its REQUEST at once and took the lease.
+
+### Files
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/NetstackNode.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/DhcpServer.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeRunner.kt
+
+## Spike console QR unreadable under Gradle on Windows (cp1252)
+
+- id: spike-console-qr-unreadable-under-gradle-on-windows-cp1252-20261020-195343
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Problem
+Running `./gradlew :app:runSpike` in a Windows console (PowerShell 5.1 in the app's Terminal panel), the console QR code printed as `?` characters and could not be scanned; other non-ASCII text was garbled too (an em dash in a devourer log line showed as `u` with an accent). The spike writes UTF-8, but the output passes through the Gradle client, which prints with the Windows ANSI code page (cp1252), where the half-block characters do not exist.
+
+### Workaround used for the GO run
+A local page rendered the same 62-byte payload: qrcode-generator (byte mode, error correction M) drew it on a canvas and jsQR decoded the canvas back to check it byte for byte. It was served with `python -m http.server --bind 127.0.0.1` from a folder holding only that page, because the app's browser pane shows file:// pages as static snapshots without JavaScript. The page lives in the git-ignored .ia-docs/qr/ and holds a one-run pairing seed only.
+
+### Proposed fix (not applied)
+Have the spike write the QR code itself as an SVG or HTML file (rectangles drawn from encodeQrMatrix, no JavaScript and no network) next to the pcap and print its path, keeping the console drawing for UTF-8 terminals. Setting `chcp 65001` and a UTF-8 stdout for the Gradle client may also work but depends on the user's console.
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeSession.kt
+- docs/HARDWARE_SETUP.md

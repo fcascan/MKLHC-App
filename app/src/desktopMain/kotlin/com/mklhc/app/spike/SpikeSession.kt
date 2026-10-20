@@ -93,7 +93,7 @@ internal suspend fun runSpikeSession(
         }
 
         val pairing = createSpikePairing(primitives, nonceTable, args.channel, args.beaconIntervalTu)
-        printPairing(pairing, args, console)
+        printPairing(pairing, args, console, onAir = false)
 
         Files.createDirectories(args.outDir)
         val pcapPath = args.outDir.resolve("spike-${LocalDateTime.now().format(FILE_TIME_FORMAT)}.pcap")
@@ -130,7 +130,7 @@ internal suspend fun runSpikeSession(
                 link.listen()
                 runner.start(scope)
                 supervisor.start()
-                armBringUp(scope, link, runner, stop)
+                armBringUp(scope, link, runner, stop) { printPairing(pairing, args, console, onAir = true) }
                 if (args.durationSeconds > 0) {
                     scope.launch {
                         delay(args.durationSeconds * MILLIS_PER_SECOND)
@@ -166,10 +166,16 @@ internal suspend fun runSpikeSession(
 
 /**
  * Waits for radiod to connect (a bad radiod build or a missing libusb library shows up here as "never connects"), then
- * brings the radio up every time a radiod connection is established, so a radiod restart re-arms the beacon. A failure
- * ends the session through [stop].
+ * brings the radio up every time a radiod connection is established, so a radiod restart re-arms the beacon, and calls
+ * [onRadioUp] each time the beacon is on air. A failure ends the session through [stop].
  */
-private fun armBringUp(scope: CoroutineScope, link: DesktopRadioLink, runner: SpikeRunner, stop: CompletableDeferred<StopRequest>) {
+private fun armBringUp(
+    scope: CoroutineScope,
+    link: DesktopRadioLink,
+    runner: SpikeRunner,
+    stop: CompletableDeferred<StopRequest>,
+    onRadioUp: () -> Unit,
+) {
     val log = Logger.withTag(TAG)
     scope.launch {
         val connected = withTimeoutOrNull(RADIOD_CONNECT_TIMEOUT_MS) { link.connected.first { it } } != null
@@ -182,6 +188,7 @@ private fun armBringUp(scope: CoroutineScope, link: DesktopRadioLink, runner: Sp
             if (!isConnected) return@collectLatest
             try {
                 runner.bringUp()
+                onRadioUp()
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -195,17 +202,31 @@ private fun armBringUp(scope: CoroutineScope, link: DesktopRadioLink, runner: Sp
 /**
  * Prints the pairing network and its QR payload. The payload (which contains the seed) is exactly what the QR code
  * shows to the kart's camera; it is printed to the console on purpose, never to the log.
+ *
+ * It is printed twice: at start-up, while the radio is still coming up (the network does not exist yet, so the kart
+ * must not scan it then), and again once the beacon is on air, so the code to scan is the last thing on screen
+ * instead of being pushed out of view by the bring-up log.
+ *
+ * @param onAir true once the pairing beacon is on air.
  */
-private fun printPairing(pairing: SpikePairing, args: SpikeArgs, console: (String) -> Unit) {
+private fun printPairing(pairing: SpikePairing, args: SpikeArgs, console: (String) -> Unit, onAir: Boolean) {
     val config = pairing.apConfig
     val payload = pairing.qrPayload
+    if (onAir) {
+        console("")
+        console("=== The pairing network is on air: show this QR code to the kart now. ===")
+    }
     console("Pairing network: ssid=${config.ssid} channel=${config.channel} bssid=${config.bssid}")
     console("Pairing QR payload (${payload.size} bytes, hex):")
     console(payload.toHexString())
     if (args.showQr) {
         console(renderQrForConsole(encodeQrMatrix(payload), darkTerminal = !args.lightTerminal))
     }
-    console("Put the kart in pairing mode (front LEDs blinking) and point its camera at the QR code.")
+    if (onAir) {
+        console("Put the kart in pairing mode (front LEDs blinking) and point its camera at the QR code.")
+    } else {
+        console("Wait: the radio is coming up (about a minute on Windows). The QR code is printed again once the network is on air; scan that one.")
+    }
 }
 
 private fun findRadiodExecutable(): Path? =

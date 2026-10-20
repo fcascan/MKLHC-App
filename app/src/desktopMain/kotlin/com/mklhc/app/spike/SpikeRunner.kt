@@ -359,15 +359,21 @@ class SpikeRunner(
     // ---- transmit -----------------------------------------------------------------------------
 
     /**
-     * Wraps a DHCP [reply] as the netstack does (UDP 67 to 68 from the AP address, then IPv4, then LLC/SNAP;
-     * broadcast for a NAK or a client that asked for it, otherwise to the offered address), encrypts it for the
+     * Wraps a DHCP [reply] (UDP 67 to 68 from the AP address, then IPv4, then LLC/SNAP), encrypts it for the
      * station, transmits it and captures its plaintext form.
+     *
+     * The IP destination follows BusyBox udhcpd, the server OpenKart runs for the kart, rather than the letter of
+     * RFC 2131 4.1: the reply goes to 255.255.255.255 while the client has no address yet (ciaddr 0), whatever its
+     * broadcast flag, and for a NAK; only a client that already has an address (a renewal) gets it unicast. Seen on
+     * hardware (2026-10-20): the kart clears the broadcast flag yet kept repeating its DISCOVER when the OFFER was
+     * unicast to the offered address; broadcast, it sends its REQUEST and takes the lease.
+     * At the 802.11 level the frame is still unicast to the station, since there is no group key.
      *
      * TODO(FrameLink): once the real link layer exists, route replies through NetstackNode instead of duplicating
      * its UDP/IPv4/LLC wrapping here.
      */
     private suspend fun sendDhcpReply(station: MacAddress, reply: DhcpMessage) {
-        val toBroadcast = reply.isBroadcast || reply.messageType == DhcpMessageType.NAK
+        val toBroadcast = reply.isBroadcast || reply.messageType == DhcpMessageType.NAK || reply.clientIp == Ipv4Address.ANY
         val destinationIp = if (toBroadcast) Ipv4Address.BROADCAST else reply.yourIp
         val udp = UdpDatagram(DhcpServer.SERVER_PORT, DhcpServer.CLIENT_PORT, reply.encode())
             .encode(AddressPlan.AP, destinationIp)

@@ -200,17 +200,24 @@ class NetstackNodeTest {
     }
 
     @Test
-    fun anOfferWithoutTheBroadcastFlagIsUnicastToTheLeaseAddress() = runTest {
+    fun repliesAreBroadcastWhileTheClientHasNoAddressEvenWithoutTheBroadcastFlag() = runTest {
         val link = FakeFrameLink()
         startedNode(link)
 
+        // The kart clears the broadcast flag but ignores an OFFER unicast to the offered address (seen on hardware),
+        // so like BusyBox udhcpd the OFFER and the ACK go to 255.255.255.255 while ciaddr is 0.
         link.pushDhcpToServer(discover(flags = 0), Ipv4Address.ANY, Ipv4Address.BROADCAST)
+        link.pushDhcpToServer(selectingRequest(flags = 0), Ipv4Address.ANY, Ipv4Address.BROADCAST)
         runCurrent()
 
-        val offer = link.sent.single().dhcpFrame()
+        assertEquals(2, link.sent.size)
+        val offer = link.sent[0].dhcpFrame()
         assertEquals(DhcpMessageType.OFFER, offer.dhcp.messageType)
-        assertEquals(kart, offer.ip.destination, "RFC 2131 section 4.1: unicast to yiaddr when the broadcast flag is clear")
+        assertEquals(Ipv4Address.BROADCAST, offer.ip.destination, "no address yet: the OFFER is broadcast")
         assertEquals(ap, offer.ip.source)
+        val ack = link.sent[1].dhcpFrame()
+        assertEquals(DhcpMessageType.ACK, ack.dhcp.messageType)
+        assertEquals(Ipv4Address.BROADCAST, ack.ip.destination, "no address yet: the ACK is broadcast")
     }
 
     @Test

@@ -40,9 +40,12 @@ import co.touchlab.kermit.Logger
  * recent ACKed client and [reset] forgets it (call it when the station disassociates).
  *
  * Wire handling is left to the caller: [handlePayload] takes and returns the BOOTP/DHCP bytes only.
- * The caller wraps a reply in UDP ([SERVER_PORT] to [CLIENT_PORT]) and IPv4 from [AddressPlan.AP]
- * (RFC 2131 section 4.1): to 255.255.255.255 when the reply's [DhcpMessage.isBroadcast] flag is set
- * or the message is a NAK, otherwise unicast to the offered address.
+ * The caller wraps a reply in UDP ([SERVER_PORT] to [CLIENT_PORT]) and IPv4 from [AddressPlan.AP]:
+ * to 255.255.255.255 while the client has no address yet (the reply's `ciaddr` is 0.0.0.0), when the
+ * reply's [DhcpMessage.isBroadcast] flag is set, or for a NAK; unicast to the offered address only for a
+ * client that already has one (a renewal). That is BusyBox udhcpd's rule, which OpenKart runs, rather than
+ * RFC 2131 section 4.1's unicast-to-yiaddr: the kart clears the broadcast flag but ignores an OFFER
+ * unicast to the offered address (seen on hardware, 2026-10-20).
  *
  * Not thread-safe: drive it from a single coroutine / thread.
  *

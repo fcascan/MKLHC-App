@@ -100,6 +100,10 @@ class SpikeSessionTest {
         assertEquals(DhcpMessageType.OFFER, offer.messageType)
         assertEquals(AddressPlan.KART_LEASE, offer.yourIp)
 
+        // Once the beacon is on air the QR code is printed again, so the code to scan is the last thing on screen.
+        assertTrue(console.text().contains("The pairing network is on air"), "the QR code is printed again once on air")
+        assertEquals(2, console.text().lines().count { it.startsWith("Pairing QR payload") })
+
         // Stopping tears everything down in order and succeeds.
         stop.complete(StopRequest("test finished", failed = false))
         assertEquals(EXIT_OK, session.await())

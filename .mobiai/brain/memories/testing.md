@@ -74,3 +74,30 @@ The PC's internal MT7922 saw the beacon on air in the first forced scan (WlanSca
 - app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeRunner.kt
 - docs/HARDWARE_SETUP.md
 - radiod/src/Radio.cpp
+
+## Phase 1 GO/NO-GO passed with the kart: association retry=0, decrypted DHCP, full lease
+
+- id: phase-1-go-no-go-passed-with-the-kart-association-retry-0-de-20261020-195341
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Result: GO (2026-10-20, Windows dev PC, TP-Link Archer T3U on WinUSB, channel 6)
+- Criterion A met: the kart (70:2c:09:b1:32:67) authenticated and associated with `retry=0` on every attempt (more than 40 association cycles over two runs). AID 1, status 0.
+- Criterion B met: its CCMP data frames decrypt with the key derived from the QR seed; the DHCP DISCOVER parses in plaintext in the pcap.
+- Beyond the gate: once the DHCP replies were broadcast (see the bugfix entry of the same date), the kart completed DISCOVER, OFFER, REQUEST, ACK and took 169.254.98.66.
+- What the kart does next: about 20 ms after the ACK it sends ARP who-has 169.254.98.65 (the AP/app address), retries after 1 s, then sends DHCP RELEASE and deauthenticates (reason 3) about 2 s after associating, and starts over. The spike answers neither ARP nor TCP, so the next step is the real wifi-ap FrameLink / KartRadioAp adapter over RadioLink, so that NetstackNode answers ARP and the RCD pairing handshake on TCP 5201 can run.
+
+### Observations for the adapter and the netstack
+- Discovery: the kart sends probe requests to the broadcast address carrying the pairing SSID; answering them (hidden AP, `ignore_broadcast_ssid=2` style) is required.
+- Its association request carries SSID, rates 1/2/5.5/11 basic + 6..54, and an RSN IE (CCMP group and pairwise, AKM PSK), listen interval 3, capability 0x0011; no WMM and no HT, so plain (non-QoS) data frames are right.
+- No power save was seen (PM bit 0 on every frame). A few retransmitted uplink frames hit the replay check (`PN replay detected`, retry=1), which is correct behaviour.
+- radiod's `rssiDbm` values were 74..97, positive, so the field is most likely a percentage, not dBm (open item noted in radiod/README.md).
+- The pairing QR has to be shown by a working renderer: under Gradle on Windows the console QR comes out as `?` (see the bugfix entry of the same date).
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeRunner.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/NetstackNode.kt
+- docs/HARDWARE_SETUP.md
