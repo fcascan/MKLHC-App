@@ -1,0 +1,3 @@
+[submodule "radiod/devourer"]
+	path = radiod/devourer
+	url = https://github.com/OpenIPC/devourer

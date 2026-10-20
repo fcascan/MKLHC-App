@@ -124,3 +124,25 @@ WHAT'S LEFT (deferred):
 1. :app WIRING (next non-hardware piece, mostly): Koin startup binding KartSession (to the real KartSessionRepository, which needs a real KartRadioAp) + include linkFeatureModule/pairingFeatureModule/cockpitFeatureModule; the navigation graph using the Root callbacks (LinkRoot onNavigateToPairing/onNavigateToCockpit, PairingRoot onPaired/onCancel, CockpitRoot onNavigateBack); AppTheme at the root; Android USB-permission UI + landscape; desktop needs kotlinx-coroutines-swing for Dispatchers.Main (in the catalog). Demoable on desktop now by binding a FakeKartSession; the real session needs the wifi-ap adapter. Also: KartInfoUi has hardcoded "Kart N"/firmware strings to localize; exclude datastore/ from Android auto-backup.
 2. The REAL wifi-ap FrameLink adapter (KartRadioAp impl over RadioLink: ApStateMachine + CCMP + LLC/SNAP + beacon GAME/PairingNetwork switching, frameLink.inbound a buffered cold flow). Partly testable, finished on hardware. Android radio (Phase 2: radiod NDK + USB fd handoff) is part of this.
 3. HARDWARE: Task 1.8 GO/NO-GO (needs the Realtek adapter + kart); on-device MediaCodec verification; desktop H.264 decoder (separate spike); IMU->HUD mapping + all the protocol unknowns confirmed via REA captures.
+
+## radiod: a fatal ERROR can be lost to a Windows socket reset (first real-binary spike run)
+
+- id: radiod-a-fatal-error-can-be-lost-to-a-windows-socket-reset-f-20261020-182710
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Problem
+First end-to-end spike run against the real radiod on Windows (2026-10-20, adapter not yet bound to WinUSB): OPEN_DEVICE fails fatally, radiod writes ERROR (code 10, "not bound to WinUSB/libusb") and exits with code 3. On the first launch the app read "Connection reset" and never received the ERROR; the supervisor relaunched radiod and only the second attempt delivered it. Likely cause: the app sends OPEN_DEVICE and INIT back to back, radiod exits without reading INIT, and closing a socket with unread bytes is an abortive close (RST) on Windows, which can discard the ERROR already in flight.
+
+### Fix (proposed, not applied)
+In radiod, on a fatal error: write ERROR, then shutdown(SD_SEND) and drain the socket until EOF or a short timeout before closing it, so the app reads the ERROR first. Optionally, the supervisor could stop relaunching radiod after exit code 3 when the last error was a configuration error (device missing or not bound), since a restart cannot fix it.
+
+### Validated in the same run
+radiod.exe found at its default path, AF_UNIX socket on Windows, token handshake, devourer version embedded (357f04520ed4), structured ERROR decoding, and a clean shutdown (radiod killed, temp socket dir removed). radiod builds clean with VS Build Tools 2026 and libusb 1.0.30 from a standalone vcpkg (VCPKG_ROOT=C:\vcpkg); devourer submodule pinned at 357f045.
+
+### Files
+- radiod/src/main.cpp
+- core/radio/src/desktopMain/kotlin/com/mklhc/core/radio/RadiodSupervisor.kt
