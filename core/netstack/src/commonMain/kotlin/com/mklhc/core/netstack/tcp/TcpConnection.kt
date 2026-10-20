@@ -544,8 +544,17 @@ class TcpConnection internal constructor(
         log.i { "enterTimeWait(): entering TIME_WAIT -> localPort=$localPort duration=${config.timeWait}" }
     }
 
+    /**
+     * Sends a RST and closes the connection at once. A null [cause] means the application asked for it ([abort], or
+     * [close] before the connection was established): routine teardown, logged at info. A cause is a failure the
+     * connection gave up on (retransmission or keepalive), logged at error.
+     */
     private suspend fun abortWithReset(cause: TcpResetException?) {
-        log.e { "abortWithReset(): resetting the connection -> state=${_state.value} localPort=$localPort cause=${cause?.message}" }
+        if (cause == null) {
+            log.i { "abortWithReset(): resetting the connection at the application's request -> state=${_state.value} localPort=$localPort" }
+        } else {
+            log.e { "abortWithReset(): resetting the connection -> state=${_state.value} localPort=$localPort cause=${cause.message}" }
+        }
         sendRst()
         abortLocally(cause ?: TcpResetException("connection reset"))
     }

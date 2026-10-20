@@ -68,7 +68,7 @@ kotlin {
 val desktopMainCompilation = kotlin.targets.getByName("desktop").compilations.getByName("main")
 tasks.register<JavaExec>("runSpike") {
     group = "application"
-    description = "Runs the radio hardware spike (Task 1.8): pairing beacon, association, DHCP DISCOVER and a decrypted pcap."
+    description = "Runs the radio hardware spike: pairing beacon, association, DHCP, ARP, the RCD pairing handshake and a decrypted pcap."
     mainClass.set("com.mklhc.app.spike.SpikeMainKt")
     classpath(desktopMainCompilation.output.allOutputs, desktopMainCompilation.runtimeDependencyFiles)
     workingDir = rootProject.projectDir

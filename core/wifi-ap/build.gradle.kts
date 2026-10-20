@@ -1,7 +1,8 @@
 // Build file for :core:wifi-ap: Kotlin Multiplatform library (desktop + Android).
-// Phase 1: hosts the CCMP crypto, which relies on the shared CryptoPrimitives (now in :core:crypto),
-// and the LP2P beacon/key derivation, which bundles the pre-encrypted nonce table as a classpath
-// resource.
+// Hosts the CCMP crypto, which relies on the shared CryptoPrimitives (now in :core:crypto), the LP2P
+// beacon/key derivation, which bundles the pre-encrypted nonce table as a classpath resource, and the
+// RadioAccessPoint: the netstack's FrameLink implemented over radiod's RadioLink. Neither :core:radio
+// nor :core:netstack depends on this module; keep it that way (no dependency cycle).
 import com.android.build.api.dsl.LibraryExtension
 
 plugins {
@@ -12,8 +13,15 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             // CryptoPrimitives is exposed through the public constructors of Ccmp, Lp2pKeys,
-            // Lp2pBeacon and ApStateMachine, so it must stay on the consumer's compile classpath.
+            // Lp2pBeacon, ApStateMachine and RadioAccessPoint, so it must stay on the consumer's compile classpath.
             api(project(":core:crypto"))
+            // RadioLink is part of the public RadioAccessPoint constructor.
+            api(project(":core:radio"))
+            // RadioAccessPoint implements FrameLink and delivers LinkPayload; FakeStation builds DHCP messages.
+            api(project(":core:netstack"))
+            // CoroutineScope and StateFlow are part of the public RadioAccessPoint API.
+            api(libs.kotlinx.coroutines.core)
+            implementation(libs.kermit)
         }
     }
 }

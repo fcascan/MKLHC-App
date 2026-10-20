@@ -1,7 +1,7 @@
 // Build file for :core:data: Kotlin Multiplatform library (desktop + Android).
 // Hosts the orchestration layer's data seams: the identity derived from the installation master
 // secret, the persistent PairingStore (in-memory and DataStore-backed), and the KartRadioAp edge
-// interface that the radio + access-point layer will implement.
+// interface with its production implementation over the radio access point (RadioKartRadioAp).
 import com.android.build.api.dsl.LibraryExtension
 
 plugins {
@@ -19,7 +19,8 @@ kotlin {
             api(project(":core:netstack"))
             // RcdServerInfo (identity factory) and the Fuji/telemetry/teleop types the orchestrator reuses.
             api(project(":core:kart-protocol"))
-            // The access-point stack KartRadioAp will be implemented over (MacAddress, ApConfig, LP2P).
+            // The access-point stack RadioKartRadioAp implements KartRadioAp over (RadioAccessPoint, ApConfig, LP2P,
+            // MacAddress); it brings :core:radio along (RadioLink and FakeRadioLink, which the tests drive).
             api(project(":core:wifi-ap"))
             api(libs.kotlinx.coroutines.core)
             // DataStore<Preferences> is part of the public DataStorePairingStore API.

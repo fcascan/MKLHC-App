@@ -2,11 +2,16 @@ package com.mklhc.app.spike
 
 import co.touchlab.kermit.Logger
 import com.mklhc.core.crypto.CryptoPrimitives
+import com.mklhc.core.netstack.AddressPlan
+import com.mklhc.core.netstack.NetstackConfig
+import com.mklhc.core.netstack.NetstackNode
 import com.mklhc.core.radio.DesktopRadioLink
 import com.mklhc.core.radio.ProcessRadiodLauncher
 import com.mklhc.core.radio.RadiodConfig
 import com.mklhc.core.radio.RadiodLauncher
 import com.mklhc.core.radio.RadiodSupervisor
+import com.mklhc.core.wifi_ap.ap.RadioAccessPoint
+import com.mklhc.core.wifi_ap.ap.RadioOptions
 import com.mklhc.core.wifi_ap.lp2p.NonceTable
 import com.mklhc.core.wifi_ap.pcap.PcapSink
 import com.mklhc.core.wifi_ap.pcap.PcapWriter
@@ -15,12 +20,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -33,11 +40,12 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.CountDownLatch
 
 /*
- * The spike's composition: the process-level wiring around SpikeRunner (radiod, the socket, the pcap file, the QR
- * image, shutdown).
+ * The spike's composition: the process-level wiring around the real link layer (radiod, the access point, the network
+ * stack, the pairing probe, the socket, the pcap file, the QR image, shutdown).
  *
  * Original code; it only starts the pieces that already exist (DesktopRadioLink and RadiodSupervisor from :core:radio,
- * SpikePairing and SpikeRunner from this package) and tears them down in the order radiod needs.
+ * RadioAccessPoint from :core:wifi-ap, NetstackNode from :core:netstack, SpikePairing and the pairing probe from this
+ * package) and tears them down in the order radiod needs.
  */
 
 /** Exit code: the session ended normally. */
@@ -57,12 +65,20 @@ internal class StopRequest(val reason: String, val failed: Boolean)
  *
  * Business logic: in order, it resolves radiod, creates a fresh pairing network, saves its QR code as an SVG image next
  * to the capture and prints the QR payload and the image path, opens the pcap file, listens on a socket in a short
- * temporary directory, starts [SpikeRunner] and the radiod supervisor, and brings the radio up every time radiod
- * connects (so a radiod restart re-arms the beacon). Then it waits for [stop]. Cleanup always runs: the QR image is
- * deleted first, then the runner stops the beacon and asks radiod to shut down, the supervisor is stopped once radiod
- * has exited by itself (so it does not launch it again), and the socket and its directory are removed.
+ * temporary directory, starts the [RadioAccessPoint] (the link layer, recording to the pcap), the [NetstackNode] on top
+ * of it (ARP, DHCP and TCP), the pairing probe and the radiod supervisor, and brings the radio up every time radiod
+ * connects, serving the pairing network each time (so a radiod restart re-arms the beacon). Then it waits for [stop].
+ * Cleanup always runs: the QR image is deleted first, then the bring-up, the pairing probe and the lease watcher are
+ * cancelled and awaited (so nothing is brought up, served or announced while the radio shuts down), then the network
+ * stack stops, then the access point stops the beacon and asks radiod to shut down, the supervisor is stopped once
+ * radiod has exited by itself (so it does not launch it again), and the socket and its directory are removed.
  *
- * Everything that touches the access point runs on one single-threaded dispatcher, as [SpikeRunner] requires.
+ * What the spike answers is everything the kart needs up to the RCD pairing handshake: authentication and association,
+ * DHCP, ARP and the TCP pairing port (see [runPairingProbe]). It stops there on purpose: it never sends the pairing
+ * request that stores the game network, so the kart should keep the pairing it has stored.
+ *
+ * Everything that touches the access point or the network stack runs on one single-threaded dispatcher, as both
+ * require.
  *
  * @param args the parsed command line.
  * @param stop completed by whoever wants the run to end (the console, the JVM shutdown hook, a test); a failed
@@ -72,6 +88,8 @@ internal class StopRequest(val reason: String, val failed: Boolean)
  * @param primitives the crypto provider.
  * @param nonceTable the LP2P nonce table; replaceable so a test knows which nonce was used.
  * @param console where the pairing information and the QR code are printed.
+ * @param log the logger of the session's own milestones (the access point and the network stack log under their own
+ * tags); injectable so a test can assert them.
  * @return [EXIT_OK], [EXIT_RADIO_FAILED] or [EXIT_USAGE].
  */
 internal suspend fun runSpikeSession(
@@ -82,8 +100,8 @@ internal suspend fun runSpikeSession(
     primitives: CryptoPrimitives = CryptoPrimitives(),
     nonceTable: NonceTable = NonceTable(),
     console: (String) -> Unit = { println(it) },
+    log: Logger = Logger.withTag(TAG),
 ): Int {
-    val log = Logger.withTag(TAG)
     // Held so the outer finally can always remove it and release the shutdown hook, even if setup throws before the
     // capture starts; otherwise the hook would block for SHUTDOWN_WAIT_MS and the temp directory would leak.
     var workDir: Path? = null
@@ -124,12 +142,10 @@ internal suspend fun runSpikeSession(
         )
 
         return FilePcapSink(pcapPath).use { sink ->
-            val runner = SpikeRunner(
+            val capture = PcapWriter(sink)
+            val accessPoint = RadioAccessPoint(
                 radio = link,
-                apConfig = pairing.apConfig,
-                capture = PcapWriter(sink),
-                captureLabel = pcapPath.toString(),
-                options = SpikeOptions(
+                options = RadioOptions(
                     vid = args.vid,
                     pid = args.pid,
                     txPowerIndex = args.txPowerIndex,
@@ -137,11 +153,30 @@ internal suspend fun runSpikeSession(
                 ),
                 primitives = primitives,
             )
+            accessPoint.capture = capture
+            // The stack's hardware address is the BSSID: it is what the kart sees frames coming from, so it is what
+            // the ARP reply for the app's address must carry.
+            val node = NetstackNode(
+                frameLink = accessPoint,
+                scope = scope,
+                config = NetstackConfig(ourIp = AddressPlan.AP, ourMac = pairing.apConfig.bssid.toByteArray()),
+            )
+            // The long-running jobs of the session, kept so the cleanup can end them before the radio goes down.
+            val sessionJobs = mutableListOf<Job>()
             try {
                 link.listen()
-                runner.start(scope)
+                // On the stack's own dispatcher, and before radiod is started: the radio's flows have no replay, so the
+                // access point subscribes first, and the stack starts reading what it delivers before it can deliver.
+                withContext(dispatcher) {
+                    accessPoint.start(scope)
+                    node.start()
+                }
+                sessionJobs += scope.launch { freeLeaseWhenStationLeaves(accessPoint.associatedStation, node, log) }
+                sessionJobs += scope.launch { runPairingProbe(node, accessPoint.associatedStation, primitives, log) }
                 supervisor.start()
-                armBringUp(scope, link, runner, stop) { printPairing(pairing, qrPath, args, console, onAir = true) }
+                sessionJobs += armBringUp(scope, link, accessPoint, pairing, stop, log) {
+                    printPairing(pairing, qrPath, args, console, onAir = true)
+                }
                 if (args.durationSeconds > 0) {
                     scope.launch {
                         delay(args.durationSeconds * MILLIS_PER_SECOND)
@@ -158,9 +193,26 @@ internal suspend fun runSpikeSession(
                 // take seconds, during which a hard kill would leave the seed-bearing file behind.
                 qrImage?.let { image -> deleteQrImage(image, console) }
                 qrImage = null
-                // On the runner's own dispatcher, as SpikeRunner requires, and even if this coroutine was cancelled.
+                // On the stack's own dispatcher, as the node and the access point require, and even if this coroutine
+                // was cancelled.
                 withContext(NonCancellable + dispatcher) {
-                    runner.stop()
+                    // Before anything is torn down: a bring-up that is still waiting for READY, a probe that is
+                    // serving a connection and the lease watcher must not run (or bring the radio up, serve the
+                    // network or print the on-air banner) while the stack and the radio shut down.
+                    endSessionJobs(sessionJobs, log)
+                    // The network stack stops before the access point, so nothing is queued for a radio that is about
+                    // to shut down; the access point then stops the beacon and asks radiod to shut down. A failing
+                    // stack must never keep the beacon on air, so it is only logged.
+                    try {
+                        node.stop()
+                    } catch (failure: Exception) {
+                        log.w {
+                            "runSpikeSession(): stopping the network stack failed, shutting the radio down anyway -> " +
+                                "message=${failure.message}"
+                        }
+                    }
+                    accessPoint.stop()
+                    log.i { "runSpikeSession(): pcap written: $pcapPath -> frames=${capture.framesWritten}" }
                     // radiod powers the chip down and exits by itself after SHUTDOWN; stopping the supervisor in
                     // that window (before its restart backoff fires) keeps it from launching radiod again.
                     withTimeoutOrNull(RADIOD_EXIT_GRACE_MS) {
@@ -182,18 +234,25 @@ internal suspend fun runSpikeSession(
 
 /**
  * Waits for radiod to connect (a bad radiod build or a missing libusb library shows up here as "never connects"), then
- * brings the radio up every time a radiod connection is established, so a radiod restart re-arms the beacon, and calls
- * [onRadioUp] each time the beacon is on air. A failure ends the session through [stop].
+ * brings the radio up every time a radiod connection is established and serves the pairing network on it, so a radiod
+ * restart re-arms the beacon, and calls [onRadioUp] each time the beacon is on air. A failure ends the session through
+ * [stop].
+ *
+ * Every bring-up is followed by serving the network: a bring-up drops whatever the access point served before (radiod
+ * restarted, so its beacon and identity are gone).
+ *
+ * @return the job that runs all of this, so the cleanup can end it before the radio is shut down.
  */
 private fun armBringUp(
     scope: CoroutineScope,
     link: DesktopRadioLink,
-    runner: SpikeRunner,
+    accessPoint: RadioAccessPoint,
+    pairing: SpikePairing,
     stop: CompletableDeferred<StopRequest>,
+    log: Logger,
     onRadioUp: () -> Unit,
-) {
-    val log = Logger.withTag(TAG)
-    scope.launch {
+): Job {
+    return scope.launch {
         val connected = withTimeoutOrNull(RADIOD_CONNECT_TIMEOUT_MS) { link.connected.first { it } } != null
         if (!connected) {
             log.e { "armBringUp(): radiod did not connect -> timeoutMs=$RADIOD_CONNECT_TIMEOUT_MS (run with --verbose for radiod's output)" }
@@ -203,7 +262,8 @@ private fun armBringUp(
         link.connected.collectLatest { isConnected ->
             if (!isConnected) return@collectLatest
             try {
-                runner.bringUp()
+                accessPoint.bringUp(pairing.apConfig.channel)
+                accessPoint.serve(pairing.apConfig)
                 onRadioUp()
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -211,6 +271,30 @@ private fun armBringUp(
                 log.e(failure) { "armBringUp(): bring-up failed -> message=${failure.message}" }
                 stop.complete(StopRequest("bring-up failed: ${failure.message}", failed = true))
             }
+        }
+    }
+}
+
+/**
+ * Cancels the session's long-running jobs and waits for them to end, for at most [SESSION_JOBS_END_TIMEOUT_MS].
+ *
+ * Business logic: the bring-up, the pairing probe and the lease watcher keep running while the cleanup shuts the
+ * network stack and the radio down. A bring-up that is still waiting for READY could otherwise complete while the
+ * access point stops, and serve the network (or print the on-air banner) on a radio that is going away. Ending them
+ * first means nothing new starts during the shutdown; the probe's own cleanup (a RST for each of its connections) runs
+ * here too, while the stack is still alive. The wait is bounded so a job that cannot end never keeps the beacon on
+ * air: the teardown goes on and the scope's cancellation at the end finishes the job.
+ *
+ * Call it under `NonCancellable`, so a cancelled session still ends them.
+ *
+ * @param jobs the jobs to end.
+ * @param log the session's logger.
+ */
+private suspend fun endSessionJobs(jobs: List<Job>, log: Logger) {
+    jobs.forEach { it.cancel() }
+    if (withTimeoutOrNull(SESSION_JOBS_END_TIMEOUT_MS) { jobs.joinAll() } == null) {
+        log.w {
+            "endSessionJobs(): some jobs did not end in time, shutting down anyway -> timeoutMs=$SESSION_JOBS_END_TIMEOUT_MS"
         }
     }
 }
@@ -280,6 +364,8 @@ private const val TOKEN_BYTES = 16
 private const val WORK_DIR_PREFIX = "mklhc-spike"
 private const val RADIOD_CONNECT_TIMEOUT_MS = 30_000L
 private const val RADIOD_EXIT_GRACE_MS = 3_000L
+private const val SESSION_JOBS_END_TIMEOUT_MS = 3_000L
+
 private val FILE_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
 private val RADIOD_CANDIDATES = listOf(
     "radiod/build/Release/radiod.exe",

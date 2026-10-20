@@ -61,9 +61,9 @@ enum class AdapterState {
  * concerned. It brings the USB radio up, runs the one-station Wi-Fi access point on it (beacons,
  * association, encryption) and exposes the result as a [FrameLink] that the network stack (DHCP, TCP,
  * UDP) runs on. The orchestrator never sees 802.11; it only needs to start and stop the unit, say
- * which of the two networks to advertise, and learn whether a station is associated. The concrete
- * implementation, the access point over the radio link, is a later task; the session repository is
- * written and tested against this interface and [FakeKartRadioAp].
+ * which of the two networks to advertise, and learn whether a station is associated. The production
+ * implementation is [RadioKartRadioAp], the access point over the radio link; the session repository
+ * is written and tested against this interface and [FakeKartRadioAp].
  *
  * The implementation owns the credentials: it derives the game network's SSID and key from the
  * installation identity and takes the BSSID and channel from the pairing store, so the orchestrator

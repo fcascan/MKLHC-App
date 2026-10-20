@@ -3,6 +3,7 @@ package com.mklhc.app.spike
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import com.mklhc.core.wifi_ap.ap.ApConfig
+import com.mklhc.core.wifi_ap.ap.RadioOptions
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import java.io.FileDescriptor
@@ -25,11 +26,13 @@ import kotlin.system.exitProcess
  * Starts the spike: launches radiod, hosts a pairing network, prints the pairing QR payload, saves the QR code as an
  * image and writes a decrypted pcap.
  *
- * Business logic: this is the GO/NO-GO run of Phase 1. `main` only parses the command line and exits with the
- * result; [runSpikeSession] wires DesktopRadioLink (the socket radiod connects to), RadiodSupervisor (keeps the radiod
- * process alive), [SpikeRunner] (the access point, DHCP and capture glue) and the pcap file, then waits to be stopped:
- * Enter on the console, the `--duration` timer, a failed bring-up or the JVM shutting down. Run it with the
- * adapter bound to WinUSB and the kart in pairing mode; see docs/HARDWARE_SETUP.md.
+ * Business logic: this is the GO/NO-GO run of Phase 1, now on the real link layer. `main` only parses the command
+ * line and exits with the result; [runSpikeSession] wires DesktopRadioLink (the socket radiod connects to),
+ * RadiodSupervisor (keeps the radiod process alive), RadioAccessPoint (the access point and the pcap capture),
+ * NetstackNode (ARP, DHCP and TCP on top of it), the pairing probe (the RCD pairing handshake) and the pcap file, then
+ * waits to be stopped: Enter on the console, the `--duration` timer, a failed bring-up or the JVM shutting down. The
+ * spike stops at the RCD handshake on purpose, so the kart keeps its stored pairing. Run it with the adapter bound to
+ * WinUSB and the kart in pairing mode; see docs/HARDWARE_SETUP.md.
  *
  * Exit codes: 0 stopped normally, 1 the radio could not be brought up, 2 bad command line or radiod not found.
  */
@@ -57,14 +60,14 @@ fun main(args: Array<String>) {
 /** The parsed command line of [main]. */
 internal data class SpikeArgs(
     val radiod: Path? = null,
-    val vid: Int = SpikeOptions.DEFAULT_VID,
-    val pid: Int = SpikeOptions.DEFAULT_PID,
+    val vid: Int = RadioOptions.DEFAULT_VID,
+    val pid: Int = RadioOptions.DEFAULT_PID,
     val channel: Int = DEFAULT_CHANNEL,
     val txPowerIndex: Int = 0,
     val beaconIntervalTu: Int = ApConfig.DEFAULT_BEACON_INTERVAL_TU,
     val outDir: Path = Path.of(DEFAULT_OUT_DIR),
     val durationSeconds: Long = 0,
-    val readyTimeoutMs: Long = SpikeOptions.DEFAULT_READY_TIMEOUT_MS,
+    val readyTimeoutMs: Long = RadioOptions.DEFAULT_READY_TIMEOUT_MS,
     val verbose: Boolean = false,
     val showQr: Boolean = true,
     val lightTerminal: Boolean = false,
@@ -154,7 +157,8 @@ private fun installConsoleStopTriggers(stop: CompletableDeferred<StopRequest>, c
 private val SPIKE_USAGE = """
     Usage: ./gradlew :app:runSpike --args="[options]"
 
-    Hosts the kart pairing network on a USB Wi-Fi adapter, waits for the kart to associate and writes a decrypted pcap.
+    Hosts the kart pairing network on a USB Wi-Fi adapter, waits for the kart to associate, answers its DHCP, ARP and
+    RCD pairing handshake (it never changes the kart's stored pairing) and writes a decrypted pcap.
 
       --radiod <path>        the radiod executable (default: radiod/build/[Release/]radiod[.exe])
       --vid <hex>            adapter USB vendor id (default 0bda)
@@ -164,7 +168,7 @@ private val SPIKE_USAGE = """
       --beacon-interval <n>  beacon interval in time units of 1024 us (default ${ApConfig.DEFAULT_BEACON_INTERVAL_TU})
       --out <dir>            directory for the pcap and the QR image (default $DEFAULT_OUT_DIR)
       --duration <seconds>   stop after this long; 0 runs until Enter or Ctrl+C (default 0)
-      --ready-timeout <s>    seconds to wait for the radio to come up (default ${SpikeOptions.DEFAULT_READY_TIMEOUT_MS / MILLIS_PER_SECOND})
+      --ready-timeout <s>    seconds to wait for the radio to come up (default ${RadioOptions.DEFAULT_READY_TIMEOUT_MS / MILLIS_PER_SECOND})
       --verbose              debug logging, including radiod's own output
       --no-qr                do not draw the QR code in the console (the payload hex and the QR image are still produced)
       --light-terminal       draw the QR code for a light terminal background

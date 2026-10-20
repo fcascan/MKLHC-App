@@ -245,7 +245,7 @@ class NetstackNode(
             log.d { "dispatchArp(): ignoring ARP that does not ask for our address -> operation=${request.operation} targetIp=${request.targetIp}" }
             return
         }
-        log.d { "dispatchArp(): answering who-has -> requester=${request.senderIp} ourIp=${config.ourIp}" }
+        log.i { "dispatchArp(): answering who-has -> requester=${request.senderIp} ourIp=${config.ourIp}" }
         sendFrame(EtherType.ARP, reply.encode())
     }
 

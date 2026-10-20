@@ -1,6 +1,7 @@
 package com.mklhc.app.spike
 
 import com.mklhc.core.wifi_ap.ap.ApConfig
+import com.mklhc.core.wifi_ap.ap.RadioOptions
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -19,8 +20,8 @@ class SpikeArgsTest {
     fun noArgumentsGiveTheReferenceAdapterOnChannel6() {
         val args = parseSpikeArgs(emptyList())
 
-        assertEquals(SpikeOptions.DEFAULT_VID, args.vid)
-        assertEquals(SpikeOptions.DEFAULT_PID, args.pid)
+        assertEquals(RadioOptions.DEFAULT_VID, args.vid)
+        assertEquals(RadioOptions.DEFAULT_PID, args.pid)
         assertEquals(0x0BDA, args.vid)
         assertEquals(0xC812, args.pid)
         assertEquals(6, args.channel)
@@ -28,7 +29,7 @@ class SpikeArgsTest {
         assertEquals(ApConfig.DEFAULT_BEACON_INTERVAL_TU, args.beaconIntervalTu)
         assertEquals(Path.of("spike-captures"), args.outDir)
         assertEquals(0L, args.durationSeconds)
-        assertEquals(SpikeOptions.DEFAULT_READY_TIMEOUT_MS, args.readyTimeoutMs)
+        assertEquals(RadioOptions.DEFAULT_READY_TIMEOUT_MS, args.readyTimeoutMs)
         assertNull(args.radiod)
         assertFalse(args.verbose)
         assertTrue(args.showQr)

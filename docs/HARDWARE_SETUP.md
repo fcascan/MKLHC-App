@@ -126,7 +126,8 @@ The program then:
    not exist before. The payload contains the pairing seed, so treat it like the QR code on a screen: anyone who can
    see it can join that one-run network. The image is deleted as soon as the spike starts stopping; a hard kill
    leaves it behind, so delete it by hand then (the spike also prints a warning if it cannot delete it).
-3. Waits for the kart, and answers its authentication, association and DHCP messages.
+3. Waits for the kart, and answers its authentication, association, DHCP and ARP, and accepts its TCP pairing
+   connection and serves the RCD pairing handshake on it (and nothing beyond: see the next sections).
 
 Once the on-air banner appears, put the kart into pairing mode (front LEDs blinking) and point its camera at the QR
 code printed under it. A dark terminal background gives the right polarity by default; on a light background use
@@ -152,33 +153,50 @@ spike printed. It appears as a hidden 802.11g network on the chosen channel.
 
 ### What a good run looks like (GO)
 
-The console logs these milestones (association first, then the kart's first data frame). The `pcap written: <path>`
-line is emitted together with the first decrypted frame, so it appears just before the `DHCP DISCOVER` line, not after;
-a final `pcap written ... frames=N` is logged at stop:
+The console logs these milestones, in this order (association, the kart's first data frame, DHCP, ARP, then the TCP
+pairing connection). They come from the access point (`RadioAccessPoint`), the DHCP server and network stack
+(`NetstackNode`) and the spike itself; each real log line starts with the function that wrote it, for example
+`onManagementFrame():`, which is left out here:
 
 ```
-auth -> sta=<kart mac> retry=0
-assoc -> sta=<kart mac> retry=0
+auth -> sta=<kart mac> retry=0 rssiDbm=<n> responses=1
+assoc -> sta=<kart mac> retry=0 rssiDbm=<n> responses=1
 KartAssociated -> sta=<kart mac> aid=1
-pcap written: <path>
-DHCP DISCOVER from <kart mac>
+first data frame decrypted -> sta=<kart mac> bytes=<n> total=<n>
+offering the lease -> xid=<xid> client=<kart mac> yiaddr=169.254.98.66
+lease acknowledged -> xid=<xid> client=<kart mac> yiaddr=169.254.98.66 leaseSeconds=<n>
+answering who-has -> requester=169.254.98.66 ourIp=169.254.98.65
+pairing TCP accepted -> peer=169.254.98.66:<port>
+RCD pairing handshake completed -> device=<name>
 ```
 
-The kart then completes DHCP (`DHCP OFFER to`, `DHCP REQUEST from`, `DHCP ACK to`, with `broadcast=true`) and takes
-its address. Next it asks for the app's address by ARP; the spike answers only DHCP, so after about two seconds the kart
-releases the lease, deauthenticates and starts over, every few seconds. That loop is expected until the full link layer
-(ARP and the TCP pairing handshake) is wired to the radio.
+The kart takes its address from the broadcast DHCP OFFER and ACK, resolves the app's address (169.254.98.65) by ARP,
+which the app answers with the BSSID as the hardware address, and then connects to TCP port 5201, the app's pairing
+port. The spike accepts that connection and serves the RCD handshake on it with a throwaway identity made for this run.
+A final `pcap written: <path> -> frames=<n>` is logged at stop.
 
-A `radiod` error logged during the run (an `ERROR` line, or `CCMP rejected a frame`) does not stop the capture on its
-own, so do not read a clean exit as proof the run was good: confirm the milestones above and the pcap before calling it a
-GO.
+The spike stops there on purpose. A real pairing goes on by connecting to the kart's own pairing service and sending it
+the game network's name and key (the `SetGroupInfo` command); the spike never does either. Since it never sends the
+pairing request that stores the game network, the kart should keep the pairing it has stored, and a kart that was paired
+before should stay paired. After the handshake the kart is expected to wait about five seconds for the app to do that
+(the design's timeout: the kart resets if the app does not connect within 5 s after the handshake), give up, release the
+lease, deauthenticate and start over, so the milestones repeat every few seconds. That loop is expected. When the kart
+drops off, the spike frees the DHCP lease and aborts the kart's stale TCP connection, which the network stack logs at
+`INFO` level as `abortWithReset(): resetting the connection at the application's request`.
 
-Open the file from `spike-captures/` in Wireshark: the kart's DHCP DISCOVER is shown in plaintext. The capture uses the
-radiotap link type and holds the management exchange as received and the data frames after decryption (the Protected
-bit is cleared and the encryption header is removed), plus the DHCP reply the app sends. The criteria for the gate are:
+A `radiod` error logged during the run (an `ERROR` line from `radiod` or `onEvent()`, or `CCMP rejected a frame`) does
+not stop the capture on its own, so do not read a clean exit as proof the run was good: confirm the milestones above and
+the pcap before calling it a GO.
+
+Open the file from `spike-captures/` in Wireshark: the kart's DHCP, ARP and TCP packets are shown in plaintext. The
+capture uses the radiotap link type and holds the management exchange as received and the data frames after decryption
+(the Protected bit is cleared and the encryption header is removed), plus everything the app sends back (DHCP, ARP and
+TCP). The criteria for the gate are:
 
 - **A.** The kart associates with the pairing network (`auth` and `assoc` with `retry=0`).
 - **B.** The app decrypts the kart's DHCP DISCOVER and the exported capture shows it in plaintext.
+- **C.** The kart's pairing TCP connection reaches the RCD handshake (`answering who-has`, `pairing TCP accepted` and
+  `RCD pairing handshake completed`).
 
 The capture contains the kart's traffic. Keep it out of the repository (`spike-captures/`, `*.pcap` and the
 `spike-*-qr.svg` images are ignored by git) and do not share it without looking at it first.
@@ -193,7 +211,9 @@ The capture contains the kart's traffic. Keep it out of the repository (`spike-c
 | `radiod did not report READY` | The adapter was found but did not come up. Replug it, and try a different USB port (a direct port, not a hub). |
 | The beacon runs but the kart never joins | Make sure the kart is in pairing mode and sees the QR code, try another `--channel`, move the adapter close to the kart, and try `--beacon-interval 50` or a higher `--tx-power`. Association needs a signal in both directions. |
 | `auth` appears with `retry=1` | The kart's frames were not acknowledged in time. Try a different channel or a closer position. |
-| The kart joins but no `DHCP DISCOVER` appears | Look for `CCMP rejected a frame` in the log: the key does not match, which usually means a stale QR code was scanned. Restart the spike and scan the new one. |
+| The kart joins but no `first data frame decrypted` appears | Look for `CCMP rejected a frame` in the log: the key does not match, which usually means a stale QR code was scanned. Restart the spike and scan the new one. |
+| The kart takes its address but `answering who-has` does not appear | The kart did not get the DHCP ACK (look for `lease acknowledged`), or its ARP frame was not received. Try a closer position. |
+| `answering who-has` appears but `pairing TCP accepted` does not | The kart's connection to port 5201 did not complete. Run with `--verbose` and look at the `TcpEndpoint` and `TcpConnection` lines; the SYN-ACK has to reach the kart, so try a closer position. |
 | The beacon keeps airing after the spike was killed | Stop the spike with Enter or `--duration` so `radiod` can stop the beacon. RTL8822BU / RTL8812BU adapters (such as the Archer T3U) keep beaconing after a hard kill until they are unplugged, so unplug the adapter in that case. |
 
 Run the spike once with a stable setup and note what you changed (beacon interval, power, channel, timing): those

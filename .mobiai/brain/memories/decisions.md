@@ -314,3 +314,35 @@ Verified on 2026-10-20 against OpenIPC/devourer master (README, docs/ap-mode.md,
 - docs/HARDWARE_SETUP.md
 - radiod/src/Radio.cpp
 - radiod/src/main.cpp
+
+## RadioAccessPoint is the FrameLink over RadioLink; RadioKartRadioAp is the production KartRadioAp
+
+- id: radioaccesspoint-is-the-framelink-over-radiolink-radiokartra-20261020-213139
+- type: architecture_decision
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Decision
+The link layer the network stack runs on is `RadioAccessPoint` in :core:wifi-ap: it implements the netstack's `FrameLink` over `RadioLink` (802.11 management through ApStateMachine, CCMP data plane, LLC/SNAP, optional pcap capture), as the design's module rules ask (netstack defines FrameLink, wifi-ap implements it over core:radio). The production `KartRadioAp` is `RadioKartRadioAp` in :core:data, which turns PAIRING / GAME into an ApConfig and serves it on that access point. The spike's former glue class (SpikeRunner) was removed; the spike now runs RadioAccessPoint + NetstackNode.
+
+### Rules that matter
+- One Mutex guards the state machine, the capture and the packet-number counter, and is held across encrypt + TX_FRAME: the kart's CCMP replay window drops a lower packet number that arrives after a higher one, so concurrent senders must go on air in PN order.
+- Transmit before capture; a failing capture never stops or reorders protocol traffic.
+- `inbound` is a fixed-capacity Channel that survives stop/start and node relaunches; overflow drops with a warning (the radio collector never suspends); queued payloads are discarded when the network is dropped.
+- `serve(config)` always replaces the state machine (station table reset, spec 8.5). `RadioKartRadioAp.beacon` is a no-op for the network already served, because the orchestrator calls `beacon(GAME)` on every recovery pass and a fresh game nonce or a station-table reset would cut off a kart that is still associated.
+- Both networks use the store's BSSID, the same address NetstackNode puts in ARP replies. GAME: identity SSID/PSK, time-based nonce. PAIRING: QR SSID, PSK = SHA-256(seed), random nonce.
+- `isStationAssociated` is set in the same step as the station, so `associatedStation` is exact right after stop() or a network switch (a stateIn mapping lagged one dispatch and let the orchestrator see a stale true).
+- A stop generation makes a bring-up still waiting for READY fail if stop() ran meanwhile, so nothing is re-armed during shutdown.
+- The access point does not touch the DHCP lease; whoever runs NetstackNode resets it.
+
+### Known gaps (follow-ups)
+- After radiod is relaunched by the supervisor, RadioKartRadioAp does not redo bring-up/serve (start() and beacon(GAME) short-circuit); documented as TODO(production wiring).
+- The TCP endpoint keeps one connection per local port and drops a SYN from a new source port while the old connection holds it; the orchestrator does not watch associatedStation during a session, so a kart that resets without FIN/RST cannot reconnect until RTO/keepalive ends the stale connection. The spike aborts its pairing connection when the station leaves for this reason.
+- The spike serves the RCD pairing handshake on 5201 but never connects to the kart's pairing service or sends SetGroupInfo, so the kart keeps its stored pairing.
+
+### Files
+- core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/RadioKartRadioAp.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeSession.kt
