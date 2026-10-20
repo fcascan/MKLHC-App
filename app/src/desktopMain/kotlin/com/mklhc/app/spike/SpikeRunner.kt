@@ -69,12 +69,16 @@ data class SpikeOptions(
         /** USB product id of the reference adapter (RTL8812CU). */
         const val DEFAULT_PID = 0xC812
 
+        /**
+         * How long to wait for READY by default. INIT loads the firmware and the PHY tables; on Windows the 8822B
+         * (TP-Link Archer T3U) needed about 46 s, because each of its ~44,000 BB/AGC/RF table writes is a USB control
+         * transfer (~1.3 ms over WinUSB). Measured on 2026-10-20.
+         */
+        const val DEFAULT_READY_TIMEOUT_MS = 120_000L
+
         private const val DEFAULT_BANDWIDTH_MHZ = 20
         private const val DEFAULT_TX_RATE = "6M"
         private const val DEFAULT_TX_RETRY_LIMIT = 7
-
-        // A cold adapter loads firmware during INIT, which takes a few seconds.
-        private const val DEFAULT_READY_TIMEOUT_MS = 20_000L
     }
 }
 

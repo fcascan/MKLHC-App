@@ -63,6 +63,7 @@ internal data class SpikeArgs(
     val beaconIntervalTu: Int = ApConfig.DEFAULT_BEACON_INTERVAL_TU,
     val outDir: Path = Path.of(DEFAULT_OUT_DIR),
     val durationSeconds: Long = 0,
+    val readyTimeoutMs: Long = SpikeOptions.DEFAULT_READY_TIMEOUT_MS,
     val verbose: Boolean = false,
     val showQr: Boolean = true,
     val lightTerminal: Boolean = false,
@@ -99,6 +100,9 @@ internal fun parseSpikeArgs(args: List<String>): SpikeArgs {
             "--beacon-interval" -> parsed.copy(beaconIntervalTu = decimalInRange(name, value(), 1..MAX_BEACON_INTERVAL_TU))
             "--out" -> parsed.copy(outDir = Path.of(value()))
             "--duration" -> parsed.copy(durationSeconds = decimalInRange(name, value(), 0..MAX_DURATION_SECONDS).toLong())
+            "--ready-timeout" -> parsed.copy(
+                readyTimeoutMs = decimalInRange(name, value(), 1..MAX_READY_TIMEOUT_SECONDS) * MILLIS_PER_SECOND,
+            )
             "--verbose" -> parsed.copy(verbose = true)
             "--no-qr" -> parsed.copy(showQr = false)
             "--light-terminal" -> parsed.copy(lightTerminal = true)
@@ -159,6 +163,7 @@ private val SPIKE_USAGE = """
       --beacon-interval <n>  beacon interval in time units of 1024 us (default ${ApConfig.DEFAULT_BEACON_INTERVAL_TU})
       --out <dir>            directory for the pcap (default $DEFAULT_OUT_DIR)
       --duration <seconds>   stop after this long; 0 runs until Enter or Ctrl+C (default 0)
+      --ready-timeout <s>    seconds to wait for the radio to come up (default ${SpikeOptions.DEFAULT_READY_TIMEOUT_MS / MILLIS_PER_SECOND})
       --verbose              debug logging, including radiod's own output
       --no-qr                do not draw the QR code (the payload hex is still printed)
       --light-terminal       draw the QR code for a light terminal background
@@ -172,4 +177,6 @@ private const val MAX_USB_ID = 0xFFFF
 private const val MAX_TX_POWER_INDEX = 255
 private const val MAX_BEACON_INTERVAL_TU = 0xFFFF
 private const val MAX_DURATION_SECONDS = 86_400
+private const val MAX_READY_TIMEOUT_SECONDS = 600
+private const val MILLIS_PER_SECOND = 1_000L
 private const val SHUTDOWN_WAIT_MS = 10_000L

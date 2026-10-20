@@ -118,7 +118,12 @@ internal suspend fun runSpikeSession(
                 apConfig = pairing.apConfig,
                 capture = PcapWriter(sink),
                 captureLabel = pcapPath.toString(),
-                options = SpikeOptions(vid = args.vid, pid = args.pid, txPowerIndex = args.txPowerIndex),
+                options = SpikeOptions(
+                    vid = args.vid,
+                    pid = args.pid,
+                    txPowerIndex = args.txPowerIndex,
+                    readyTimeoutMs = args.readyTimeoutMs,
+                ),
                 primitives = primitives,
             )
             try {

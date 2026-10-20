@@ -49,3 +49,28 @@ With the T3U bound to WinUSB (Zadig may show it as "802.11ac NIC" or "TP-Link Wi
 - radiod/CMakeLists.txt
 - radiod/README.md
 - docs/HARDWARE_SETUP.md
+
+## T3U no-kart smoke test passed: READY in ~46 s on Windows, beacon seen on air
+
+- id: t3u-no-kart-smoke-test-passed-ready-in-46-s-on-windows-beaco-20261020-191026
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-20
+
+### Result (2026-10-20, Windows dev PC, T3U 2357:012d bound to WinUSB)
+PASS. Command: `./gradlew :app:runSpike --args="--vid 2357 --pid 012d --duration 150 --ready-timeout 120 --no-qr --verbose"`.
+Timeline from process start (about 6 s of Gradle start-up included): radiod up, USB open, power-on, firmware download and boot at 6 s; BB phy_reg + agc_tab (24,352 writes) from 7 to 38 s; RF radioa + radiob from 38 to 51 s; LCK, IQK (every fail count 0) and TXAGC to 53 s; READY at 53 s (chip RTL8822B, C8822B, cut 3, 2T2R, rfe_type 3); the hardware beacon armed at once (channel 6, 100 TU, 191 bytes).
+The PC's internal MT7922 saw the beacon on air in the first forced scan (WlanScan + `netsh wlan show networks mode=bssid`): the spike's BSSID at 100% signal, 2.4 GHz, channel 6, 802.11g. RX counted about 15 ambient frames per second, txErrors 0. Clean stop: beacon stopped, clean EOF, radiod exit 0, no leftover process.
+
+### Findings
+- INIT takes about 46 s on Windows because every PHY table write is a USB control transfer (~1.3 ms over WinUSB). The spike's default READY timeout went from 20 s to 120 s and `--ready-timeout` was added. The real KartRadioAp bring-up must budget for this on desktop; Android (usbfs) should be faster, to be measured in Phase 2.
+- `Jaguar2: LCK TIMEOUT (LO not locked!)` is logged on the 8822B but is a known false alarm (devourer HalJaguar2.cpp: the direct RF read returns transient status bits, and the LO does lock). The radio worked.
+- The T3U enumerates at 480 Mbit/s (USB 2 mode, the 88x2bu default).
+- Next: the kart GO/NO-GO (pairing, association with retry=0, decrypted DHCP DISCOVER).
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeRunner.kt
+- docs/HARDWARE_SETUP.md
+- radiod/src/Radio.cpp

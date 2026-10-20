@@ -112,6 +112,7 @@ Options go through `--args` (quote paths that contain spaces):
 | `--beacon-interval <n>` | Beacon interval in time units of 1024 microseconds (default 100). |
 | `--out <dir>` | Where the capture is written (default `spike-captures/`). |
 | `--duration <seconds>` | Stop after this long; 0 runs until you press Enter (default 0). |
+| `--ready-timeout <seconds>` | How long to wait for the radio to come up before giving up (default 120). |
 | `--verbose` | Debug logging, including `radiod`'s own output. |
 | `--no-qr`, `--light-terminal` | Skip drawing the QR code, or draw it for a light terminal background. |
 
@@ -130,6 +131,17 @@ the hex payload into a QR generator that can encode raw bytes in byte mode at er
 
 Press **Enter** to stop (or use `--duration`). Stopping asks `radiod` to shut the radio down, which also stops the
 beacon.
+
+### Bringing the radio up (no kart needed)
+
+The radio takes a while to come up. On Windows the RTL8822BU (Archer T3U) needs about 50 seconds, most of it spent
+writing the chip's PHY tables one USB control transfer at a time. Meanwhile the console shows `applying BB phy_reg ...`
+and `applying RF radioa ...`, then `radio up: chip=...` and `beacon started`. On this chip a line
+`LCK TIMEOUT (LO not locked!)` is a known false alarm of the driver's lock check; the radio works.
+
+To check that the beacon is on air before involving the kart, list the networks with another Wi-Fi adapter of the
+computer (on Windows, `netsh wlan show networks mode=bssid`; a scan cycle can take a minute) and look for the BSSID the
+spike printed. It appears as a hidden 802.11g network on the chosen channel.
 
 ### What a good run looks like (GO)
 

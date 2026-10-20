@@ -28,6 +28,7 @@ class SpikeArgsTest {
         assertEquals(ApConfig.DEFAULT_BEACON_INTERVAL_TU, args.beaconIntervalTu)
         assertEquals(Path.of("spike-captures"), args.outDir)
         assertEquals(0L, args.durationSeconds)
+        assertEquals(SpikeOptions.DEFAULT_READY_TIMEOUT_MS, args.readyTimeoutMs)
         assertNull(args.radiod)
         assertFalse(args.verbose)
         assertTrue(args.showQr)
@@ -46,6 +47,7 @@ class SpikeArgsTest {
                 "--beacon-interval", "50",
                 "--out=captures",
                 "--duration", "300",
+                "--ready-timeout=120",
             ),
         )
 
@@ -57,6 +59,7 @@ class SpikeArgsTest {
         assertEquals(50, args.beaconIntervalTu)
         assertEquals(Path.of("captures"), args.outDir)
         assertEquals(300L, args.durationSeconds)
+        assertEquals(120_000L, args.readyTimeoutMs)
     }
 
     @Test
@@ -83,6 +86,8 @@ class SpikeArgsTest {
         assertTrue("--tx-power" in message("--tx-power", "256"))
         assertTrue("--beacon-interval" in message("--beacon-interval", "0"))
         assertTrue("--duration" in message("--duration", "-1"))
+        assertTrue("--ready-timeout" in message("--ready-timeout", "0"))
+        assertTrue("--ready-timeout" in message("--ready-timeout", "601"))
         assertTrue("needs a value" in message("--radiod"))
     }
 }
