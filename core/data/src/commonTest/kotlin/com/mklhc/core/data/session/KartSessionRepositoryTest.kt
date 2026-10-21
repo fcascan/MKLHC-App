@@ -82,12 +82,21 @@ class KartSessionRepositoryTest {
         scope: CoroutineScope = backgroundScope,
         radioSeenByRepo: (FakeKartRadioAp) -> KartRadioAp = { it },
         kartServicesLateBy: Duration? = null,
+        videoDatagramTap: ((ByteArray) -> Unit)? = null,
     ): Harness {
         val radio = FakeKartRadioAp()
         val store = store(settings)
         // The deadman and the connect window measure real elapsed time; the real monotonic clock does not
         // advance with virtual time, so give the repository the test scheduler's virtual time source.
-        val repo = KartSessionRepository(radioSeenByRepo(radio), store, crypto, scope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        val repo = KartSessionRepository(
+            radioSeenByRepo(radio),
+            store,
+            crypto,
+            scope,
+            clock = fixedClock,
+            timeSource = testScheduler.timeSource,
+            videoDatagramTap = videoDatagramTap,
+        )
         val kart = FakeKart(radio, masterSecret(), scope, crypto, servicesLateBy = kartServicesLateBy)
         kart.start()
         return Harness(radio, store, repo, kart)
@@ -247,6 +256,47 @@ class KartSessionRepositoryTest {
 
         awaitCondition { frames.isNotEmpty() }
         assertContentEquals(h264, frames.first(), "the reassembled access unit is the H.264 payload")
+    }
+
+    @Test
+    fun everyVideoDatagramReachesTheTapAsReceivedBeforeReassembly() = runTest {
+        val tapped = ArrayList<ByteArray>()
+        val h = harness(videoDatagramTap = { tapped += it.copyOf() })
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        val start = videoStartDatagram(byteArrayOf(0, 0, 0, 1, 0x65, 0x88.toByte()))
+        val runt = byteArrayOf(1, 2, 3) // shorter than the trailer: the reassembler drops it, the tap still sees it
+        h.kart.sendVideo(start)
+        h.kart.sendVideo(runt)
+
+        awaitCondition { tapped.size == 2 }
+        assertContentEquals(start, tapped[0])
+        assertContentEquals(runt, tapped[1])
+    }
+
+    @Test
+    fun aTapThatThrowsNeitherStopsTheVideoNorReachesTheSession() = runTest {
+        var tapCalls = 0
+        val h = harness(videoDatagramTap = {
+            tapCalls++
+            error("disk full")
+        })
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+        val frames = ArrayList<ByteArray>()
+        backgroundScope.launch { h.repo.videoAccessUnits.collect { frames += it } }
+        delay(10) // let the collector subscribe
+
+        val h264 = byteArrayOf(0, 0, 0, 1, 0x65, 0x88.toByte(), 0x84.toByte(), 0x21)
+        h.kart.sendVideo(videoStartDatagram(h264))
+        h.kart.sendVideo(videoStartDatagram(h264))
+
+        awaitCondition { frames.size == 2 }
+        assertEquals(2, tapCalls, "the tap is still called after it failed")
+        assertEquals(LinkState.Driving, h.repo.linkState.value)
     }
 
     // ---- pairing ------------------------------------------------------------------------------

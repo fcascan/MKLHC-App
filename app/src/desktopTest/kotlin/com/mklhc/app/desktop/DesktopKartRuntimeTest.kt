@@ -208,6 +208,43 @@ class DesktopKartRuntimeTest {
         runtime.shutdown()
     }
 
+    // ---- The video dump --------------------------------------------------------------------------------
+
+    @Test
+    fun aVideoDumpFolderGetsOneDumpFileThatTheShutdownCloses() = runtimeTest {
+        val logs = LogCapture()
+        val folder = tempDir.resolve("captures")
+        withGlobalLogWriter(logs) {
+            val runtime = runtime(settings().copy(videoDumpDirectory = folder))
+            runtime.session.stop()
+            runtime.shutdown()
+        }
+
+        val dumps = Files.list(folder).use { files -> files.toList() }
+        val dump = dumps.single()
+        assertTrue(dump.fileName.toString().matches(Regex("video-\\d{8}-\\d{6}\\.viddump")), "file name: ${dump.fileName}")
+        assertContentEquals(VideoDatagramDump.MAGIC.encodeToByteArray(), Files.readAllBytes(dump), "an empty dump is its magic")
+        assertTrue(logs.has("close(): video dump closed -> path=$dump datagrams=0"), logs.text())
+    }
+
+    @Test
+    fun aVideoDumpFolderThatCannotBeUsedIsReportedAndTheRadioStillRuns() = runtimeTest {
+        val logs = LogCapture()
+        // A regular file in the way: the folder cannot be created under it.
+        val blocked = Files.createFile(tempDir.resolve("not-a-folder")).resolve("captures")
+        val runtime = runtime(settings().copy(videoDumpDirectory = blocked), log = logs.logger())
+
+        runtime.start()
+        runtime.session.start()
+
+        assertTrue(logs.has("ERROR: openVideoDumpOrNull(): the video dump cannot be opened, running without it"), logs.text())
+        assertTrue(logs.has("MKLHC_VIDEO_DUMP"), logs.text())
+        launcher.awaitProcess(0).awaitMessages<RadioMessage.StartBeacon>(1)
+        awaitLinkState(runtime, LinkState.Beaconing(KartNetworkKind.GAME))
+        runtime.session.stop()
+        runtime.shutdown()
+    }
+
     // ---- The identity and the secrets ----------------------------------------------------------------
 
     @Test

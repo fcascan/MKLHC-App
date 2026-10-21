@@ -65,7 +65,7 @@ fun main(args: Array<String>) {
     }
     log.i {
         "main(): starting -> mode=radio radio=${settings.radioId} radiod=${settings.radiodExecutable} " +
-            "dataDirectory=${settings.dataDirectory}"
+            "dataDirectory=${settings.dataDirectory} videoDump=${settings.videoDumpDirectory ?: "off"}"
     }
     val dataDirectory = lockDataDirectoryOrExit(settings, log)
     val runtime = DesktopKartRuntime(settings)

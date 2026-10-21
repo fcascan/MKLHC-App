@@ -21,7 +21,8 @@ import java.nio.file.Path
  * executable and the data directory it uses.
  *
  * Business logic: the app is configured from the environment, so `:app:run` needs no arguments and a packaged app needs
- * no config file. Every value has a default that suits the reference setup:
+ * no config file. Every value has a default that suits the reference setup (the paths are made absolute against the
+ * working directory):
  *
  * - `MKLHC_RADIO`: the adapter's USB id as `vvvv:pppp` in hexadecimal; the reference adapter `0bda:c812` by default (the
  *   TP-Link Archer T3U is `2357:012d`).
@@ -32,6 +33,8 @@ import java.nio.file.Path
  *   location of the operating system with an `MKLHC` folder: `%APPDATA%\MKLHC` on Windows,
  *   `~/Library/Application Support/MKLHC` on macOS, `$XDG_CONFIG_HOME/MKLHC` or `~/.config/MKLHC` elsewhere.
  * - `MKLHC_DEMO=1`, or the `--demo` program argument: the scripted demo, with no radio and no kart.
+ * - `MKLHC_VIDEO_DUMP`: a folder to dump the kart's raw video datagrams into, one file per run (see
+ *   [VideoDatagramDump]); unset by default, which dumps nothing. A diagnostic for studying the video stream.
  *
  * A variable set to a blank value counts as unset. A path in double quotes is taken without them, since cmd's
  * `set MKLHC_RADIOD="C:\Program Files\radiod.exe"` keeps the quotes in the value. A value that cannot be used (a
@@ -45,6 +48,7 @@ import java.nio.file.Path
  * @property radioPid the adapter's USB product id.
  * @property radiodExecutable the absolute path of the radiod executable (it may not exist).
  * @property dataDirectory the absolute directory the pairing file lives in.
+ * @property videoDumpDirectory the absolute folder the raw video datagrams are dumped into, or null for no dump.
  */
 data class DesktopRadioSettings(
     val demo: Boolean,
@@ -52,6 +56,7 @@ data class DesktopRadioSettings(
     val radioPid: Int,
     val radiodExecutable: Path,
     val dataDirectory: Path,
+    val videoDumpDirectory: Path? = null,
 ) {
     /** The adapter's USB id as `vvvv:pppp` in lowercase hexadecimal, the form `MKLHC_RADIO` takes. */
     val radioId: String get() = "${hex4(radioVid)}:${hex4(radioPid)}"
@@ -105,12 +110,14 @@ data class DesktopRadioSettings(
                 env.pathValueOf(ENV_DATA_DIR)?.let { pathOf(it, ENV_DATA_DIR) }
                     ?: defaultDataDirectory(osName, systemProperties[PROPERTY_USER_HOME].orEmpty(), env),
             )
+            val videoDump = env.pathValueOf(ENV_VIDEO_DUMP)?.let { workingDirectory.resolve(pathOf(it, ENV_VIDEO_DUMP)) }
             return DesktopRadioSettings(
                 demo = demo,
                 radioVid = vid,
                 radioPid = pid,
                 radiodExecutable = radiod.normalize(),
                 dataDirectory = dataDirectory.normalize(),
+                videoDumpDirectory = videoDump?.normalize(),
             )
         }
 
@@ -184,6 +191,9 @@ data class DesktopRadioSettings(
 
         /** The environment variable that selects the demo. */
         const val ENV_DEMO = "MKLHC_DEMO"
+
+        /** The environment variable with the folder the raw video datagrams are dumped into. */
+        const val ENV_VIDEO_DUMP = "MKLHC_VIDEO_DUMP"
 
         /** The program argument that selects the demo. */
         const val ARG_DEMO = "--demo"

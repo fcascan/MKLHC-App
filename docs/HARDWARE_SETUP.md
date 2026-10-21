@@ -292,6 +292,7 @@ PowerShell, for example, `$env:MKLHC_RADIO = "2357:012d"`):
 | `MKLHC_RADIOD` | The `radiod` executable. | The first build found in `radiod/build` (see [Build radiod](#build-radiod)), from the working directory. |
 | `MKLHC_DATA_DIR` | Where the app keeps its pairing identity. | `%APPDATA%\MKLHC` on Windows, `~/Library/Application Support/MKLHC` on macOS, `$XDG_CONFIG_HOME/MKLHC` (or `~/.config/MKLHC`) on Linux. |
 | `MKLHC_DEMO` | `1` runs the scripted demo instead: no radio and no kart, for working on the screens. | `0` |
+| `MKLHC_VIDEO_DUMP` | A folder to dump the kart's raw video datagrams into, for studying the video stream (see [Dump the raw video](#dump-the-raw-video)). | Unset: no dump. |
 
 For UI work without hardware, use `MKLHC_DEMO=1` or `./gradlew :app:run --args="--demo"`; the window title then ends in
 `(demo)`. A variable set to an empty value counts as unset. A value the app cannot use (for example
@@ -362,6 +363,28 @@ radio is still coming up is harmless: nothing is on air yet, and `radiod`, busy 
 seconds. The app runs the same cleanup when the operating system ends it (a logout, a SIGTERM, Ctrl+C in a terminal),
 but not when it is killed outright: as with the spike, do not stop it with Ctrl+C under Gradle, which on Windows ends it
 without that cleanup; if an adapter keeps beaconing after a hard kill, unplug it.
+
+### Dump the raw video
+
+The desktop app has no H.264 decoder yet: its cockpit shows a black box that only counts the video frames. To study the
+kart's video stream with real data, set `MKLHC_VIDEO_DUMP` to a folder before starting the app (in PowerShell,
+`$env:MKLHC_VIDEO_DUMP = "spike-captures\video"`). The app then writes every datagram that reaches its video port, exactly
+as received and before any reassembly, to `video-<date>-<time>.viddump` in that folder (created if needed), one file per
+run; its first log lines name the file (`open(): dumping the raw video datagrams -> path=<file>`). Closing the window
+closes the file (`close(): video dump closed -> path=<file> datagrams=<n> bytes=<n>`).
+
+Use a folder on a local disk: the app writes each datagram as it arrives, and a slow folder (a network share, a synced
+folder) slows the kart session down with it.
+
+The file starts with the 8 ASCII octets `MKLHCVD1`, then holds one record per datagram: the receive time (8 octets,
+microseconds since the Unix epoch, from the wall clock), the payload length (4 octets), both little-endian, then the
+payload. A run that was killed, or a full disk, can leave a short last record: drop it when reading. Only the video
+port's payloads are written, never the radio frames or the control traffic, so the file holds no network key; it does
+hold the camera's picture, so keep it on your machine (`*.viddump` files are ignored by git). The kart sends about
+280 KB per second; the dump stops by itself at 256 MiB, about a quarter of an hour, with a warning in the log, and also
+stops with a warning if a write fails (a full disk). The kart session goes on either way. A folder that cannot be created
+is reported at start-up (`openVideoDumpOrNull(): the video dump cannot be opened, running without it`) and the app runs
+without the dump.
 
 ### If the app does not work
 

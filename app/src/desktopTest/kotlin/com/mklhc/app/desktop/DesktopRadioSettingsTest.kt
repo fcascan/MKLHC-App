@@ -141,6 +141,16 @@ class DesktopRadioSettingsTest {
     }
 
     @Test
+    fun theVideoDumpIsOffByDefaultAndTheVariableNamesItsFolder() {
+        val dumps = absolute("captures", "video")
+
+        assertNull(parse().videoDumpDirectory)
+        assertNull(parse(env = mapOf("MKLHC_VIDEO_DUMP" to "  ")).videoDumpDirectory, "blank counts as unset")
+        assertEquals(dumps, parse(env = mapOf("MKLHC_VIDEO_DUMP" to "\"$dumps\"")).videoDumpDirectory)
+        assertEquals(workingDirectory().resolve("video"), parse(env = mapOf("MKLHC_VIDEO_DUMP" to "video")).videoDumpDirectory)
+    }
+
+    @Test
     fun theDemoIsChosenByTheVariableOrTheArgument() {
         assertTrue(parse(env = mapOf("MKLHC_DEMO" to "1")).demo)
         assertTrue(parse(env = mapOf("MKLHC_DEMO" to "TRUE")).demo)
@@ -171,7 +181,7 @@ class DesktopRadioSettingsTest {
     @Test
     fun aPathTheFileSystemRejectsFailsNamingTheVariable() {
         // A NUL character is refused by the file system on every platform.
-        listOf("MKLHC_RADIOD", "MKLHC_DATA_DIR").forEach { variable ->
+        listOf("MKLHC_RADIOD", "MKLHC_DATA_DIR", "MKLHC_VIDEO_DUMP").forEach { variable ->
             val failure = assertFailsWith<IllegalArgumentException>(variable) { parse(env = mapOf(variable to "bad\u0000path")) }
             assertTrue(failure.message.orEmpty().startsWith(variable), failure.message)
         }

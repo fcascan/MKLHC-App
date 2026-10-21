@@ -146,6 +146,10 @@ import kotlin.time.TimeSource
  * @param timeSource the monotonic source the deadman and the connect window measure elapsed real time
  *   against; [TimeSource.Monotonic] in production, the test scheduler's virtual source under `runTest`
  *   (the real monotonic clock does not advance with virtual time, so it must be injected for tests).
+ * @param videoDatagramTap a diagnostic hook handed every video datagram's payload as received, before the
+ *   reassembler sees it (the desktop app's raw video dump); null for none. It runs on [scope], so it must
+ *   return quickly; it must not keep or change the array. A failure it throws is logged (the first one per
+ *   video loop) and does not reach the session.
  */
 class KartSessionRepository(
     private val radioAp: KartRadioAp,
@@ -155,6 +159,7 @@ class KartSessionRepository(
     private val clock: () -> Long,
     private val config: SessionConfig = SessionConfig(),
     private val timeSource: TimeSource = TimeSource.Monotonic,
+    private val videoDatagramTap: ((ByteArray) -> Unit)? = null,
 ) : KartSession {
     private val log = Logger.withTag(TAG)
 
@@ -754,9 +759,18 @@ class KartSessionRepository(
 
     private suspend fun videoLoop(udp: UdpEndpoint) {
         val reassembler = LspVideoReassembler()
+        var tapFailures = 0
         try {
             while (true) {
                 val datagram = udp.receive()
+                videoDatagramTap?.let { tap ->
+                    try {
+                        tap(datagram.payload)
+                    } catch (failure: Exception) {
+                        // Logged once per video loop: a tap that keeps failing must not flood the log at the video rate.
+                        if (tapFailures++ == 0) log.w { "videoLoop(): the video datagram tap failed -> message=${failure.message}" }
+                    }
+                }
                 for (frame in reassembler.feed(datagram.payload)) {
                     _videoAccessUnits.emit(frame)
                 }

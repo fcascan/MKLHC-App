@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
@@ -56,7 +57,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   path must stay short), a random token is drawn for radiod's HELLO, and the radio link, the radiod supervisor, the
  *   access point over the link (opening the adapter of [DesktopRadioSettings.radioId]), the pairing store in the data
  *   directory, the radio unit and the [KartSessionRepository] are built on it. The app creates and locks the data
- *   directory before building the runtime (see [DesktopDataDirectory]), so one runtime at a time uses it.
+ *   directory before building the runtime (see [DesktopDataDirectory]), so one runtime at a time uses it. When
+ *   [DesktopRadioSettings.videoDumpDirectory] is set, a [VideoDatagramDump] is opened there and the session hands it
+ *   every video datagram; a folder that cannot be used is logged at error and the app runs without the dump.
  * - The adapter is "ready" while radiod is connected and "absent" otherwise, so the UI shows the no-adapter state until
  *   radiod is up (and for good when radiod is missing). The radio unit waits for the connection before it brings the
  *   radio up, and brings it up again (same network, same keys) when the supervisor has relaunched radiod after a crash.
@@ -69,7 +72,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   radio down and exits on the end of its connection exactly as on SHUTDOWN (radiod's main.cpp), so a radiod the
  *   session never used exits at once too, instead of being waited for and killed. It then waits briefly for the
  *   supervisor to see radiod exit and stops it before its restart backoff can launch radiod again, cancels everything
- *   this class started, releases the pairing file and removes the socket and its directory.
+ *   this class started, releases the pairing file, removes the socket and its directory, and closes the video dump.
  *
  * Threading: everything that touches the access point, the network stack or the session repository runs on the
  * runtime's dispatcher, `Dispatchers.Default.limitedParallelism(1)`, as those classes require: one task at a time, in
@@ -123,6 +126,9 @@ class DesktopKartRuntime(
         .map { connected -> if (connected) AdapterState.READY else AdapterState.ABSENT }
         .stateIn(scope, SharingStarted.Eagerly, AdapterState.ABSENT)
 
+    // Opened with the runtime when MKLHC_VIDEO_DUMP names a folder; one that cannot be used leaves the dump off.
+    private val videoDump: VideoDatagramDump? = settings.videoDumpDirectory?.let(::openVideoDumpOrNull)
+
     private val repository = KartSessionRepository(
         radioAp = RadioKartRadioAp(
             accessPoint = RadioAccessPoint(
@@ -141,6 +147,7 @@ class DesktopKartRuntime(
         crypto = crypto,
         scope = scope,
         clock = clock,
+        videoDatagramTap = videoDump?.let { dump -> dump::write },
     )
 
     /** The session the UI binds: the real one, with its commands moved onto the runtime's dispatcher. */
@@ -228,7 +235,19 @@ class DesktopKartRuntime(
             Files.deleteIfExists(socketPath)
             Files.deleteIfExists(socketDirectory)
         }
+        videoDump?.close()
         log.i { "shutdown(): radio runtime shut down" }
+    }
+
+    /** Opens the video dump in [directory], or logs why it cannot and returns null so the app runs without it. */
+    private fun openVideoDumpOrNull(directory: Path): VideoDatagramDump? = try {
+        VideoDatagramDump.open(directory)
+    } catch (failure: IOException) {
+        log.e {
+            "openVideoDumpOrNull(): the video dump cannot be opened, running without it -> directory=$directory " +
+                "message=${failure.message} (set ${DesktopRadioSettings.ENV_VIDEO_DUMP} to a folder you can write, or unset it)"
+        }
+        null
     }
 
     /** Runs one shutdown step, logging a failure instead of throwing it, so the steps after it still run. */
