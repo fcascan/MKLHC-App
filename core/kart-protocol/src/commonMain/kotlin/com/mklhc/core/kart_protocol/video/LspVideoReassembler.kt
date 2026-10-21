@@ -1,4 +1,6 @@
 // Adapted from mk-live https://github.com/olus85/mk-live, src/mk_live/video_worker.py (MIT).
+// The continuation header, the chunk length and the sequence-number check are original: they follow the layout
+// measured from the kart's stream on 2026-10-21 (see LspVideo), which the reference does not handle.
 package com.mklhc.core.kart_protocol.video
 
 import co.touchlab.kermit.Logger
@@ -6,36 +8,44 @@ import co.touchlab.kermit.Logger
 /**
  * Rebuilds H.264 Annex-B video frames from the kart's UDP video datagrams.
  *
- * Business logic: the kart sends each video frame as one or more datagrams. The first datagram of a frame
- * carries a "FRAM" record (see [findFramStart]) that gives the frame's total H.264 length and where its
- * H.264 starts; if the frame does not fit one datagram the rest follows in continuation datagrams that
- * hold only H.264 bytes. Every datagram ends with an [LspVideo.PACKET_TRAILER]-octet trailer that is not
- * H.264 and is removed. A frame is complete when its H.264 length is reached; it is then handed out as
- * exactly that many octets (the trailers and any surplus are never part of it).
+ * Business logic: the kart sends each video frame as one or more datagrams, each starting with a
+ * [LspVideo.DATAGRAM_HEADER]-octet header (sequence number, group, chunk header) and ending with an
+ * [LspVideo.PACKET_TRAILER]-octet trailer, neither of which is H.264. The first datagram of a frame carries a
+ * "FRAM" record (see [findFramStart]) that gives the frame's total H.264 length and where its H.264 starts; the
+ * rest follows in continuation datagrams. A frame is complete when its H.264 length is reached; it is then handed
+ * out as exactly that many octets.
  *
  * Rules, in the order [feed] applies them to each datagram:
- * 1. A datagram shorter than the trailer is dropped (it cannot hold anything) and logged at debug level.
- * 2. A datagram for which [findFramStart] finds a record STARTS a frame, taking its bytes from `rawStart`
- *    up to the trailer.
- * 3. Any other datagram is a CONTINUATION: its bytes up to the trailer are appended to the frame in
- *    progress; with no frame in progress it is dropped and logged at debug level.
- * 4. When the frame reaches its H.264 length it is emitted and the state is cleared. Octets beyond the
- *    length (the datagram that completes a frame can carry more than is needed) are trimmed and counted
- *    in [bytesDropped].
+ * 1. A datagram shorter than its header and trailer is dropped (it cannot hold anything) and logged at debug
+ *    level; it does not count for the sequence. (Every datagram the kart was seen to send is 1416 octets; should
+ *    it ever send a short one, the datagram after it is then taken for a loss.)
+ * 2. The sequence number (octets 2-4) must follow the previous datagram's, wrapping at 2^24. When it does not
+ *    (a datagram was lost, or came twice) and a frame is in progress, that frame is dropped with a warning, since
+ *    it can no longer come out right.
+ * 3. A datagram for which [findFramStart] finds a record STARTS a frame, taking its bytes from `rawStart` up to
+ *    the trailer.
+ * 4. Any other datagram is a CONTINUATION. Its H.264 starts right after the header. When its chunk header gives
+ *    a length ([LspVideo.CHUNK_WITH_LENGTH]) the chunk holds `length + 1` octets, and whatever follows it before
+ *    the trailer is stale padding, not counted anywhere; otherwise (the last datagram of a group) the H.264 runs
+ *    to the trailer. With no frame in progress the datagram is dropped and logged at debug level.
+ * 5. When the frame reaches its H.264 length it is emitted and the state is cleared. Octets beyond the length
+ *    (the last datagram of a frame is padded with stale octets) are trimmed and counted in [bytesDropped].
  *
- * INCOMPLETE-FRAME POLICY: if a new frame starts while the previous one is still incomplete (a datagram of
- * it was lost or arrived late), the incomplete frame is DROPPED, never emitted as a partial frame; a
- * warning is logged, [framesDropped] is incremented and its buffered octets are added to [bytesDropped];
- * then the new frame begins fresh. The same applies to [reset]. A partial access unit would only corrupt
- * the decoder's picture, so the decoder is left to resynchronise on the next frame.
+ * INCOMPLETE-FRAME POLICY: if a new frame starts while the previous one is still incomplete, or a datagram of it
+ * was lost (rule 2), the incomplete frame is DROPPED, never emitted as a partial frame; a warning is logged,
+ * [framesDropped] is incremented and its buffered octets are added to [bytesDropped]; continuations that still
+ * belong to it are then dropped as having no frame in progress, and the next frame begins fresh. [reset] drops
+ * the frame the same way (logged at debug level) and forgets the sequence. A partial access unit would only
+ * corrupt the decoder's picture, so the decoder is left to resynchronise on the next frame.
  *
  * Memory is bounded: the buffer of a frame is allocated at its announced H.264 length, which
  * [findFramStart] caps at [LspVideo.MAX_FRAM_PACKET_SIZE] minus [LspVideo.FRAM_SIZE_OVERHEAD], and nothing
  * is ever appended beyond it, so a malformed stream cannot grow memory without bound.
  *
- * Known limits (inherited from the reference): there is no sequence number, so a lost continuation in the
- * middle of a frame is not detected and the frame comes out the right length but corrupt; and a
- * continuation that happens to hold "FRAM" at the right offset would be taken for a new start.
+ * Known limits: a continuation that happens to hold "FRAM" at the right offset would be taken for a new start;
+ * and in the measured stream 14 of 2,185 frames hold a continuation of odd length (chunk length 0x56e-0x571):
+ * they are emitted at their FRAM length but complete one datagram early, so their last datagram is then dropped
+ * as a continuation with no frame in progress and their final octet may be wrong (open question).
  *
  * Pure byte processing: not suspending, no I/O, and not thread-safe (one coroutine feeds it). The counters
  * are exposed for tests and diagnostics.
@@ -52,22 +62,28 @@ class LspVideoReassembler(
     /** Octets of [frame] filled so far. */
     private var filled: Int = 0
 
+    /** The sequence number of the last datagram fed, or null before the first one and after [reset]. */
+    private var lastSequence: Int? = null
+
     /** Frames emitted so far. */
     var framesEmitted: Int = 0
         private set
 
-    /** Incomplete frames abandoned because a new frame started or [reset] was called. */
+    /** Incomplete frames abandoned because a new frame started, a datagram was lost, or [reset] was called. */
     var framesDropped: Int = 0
         private set
 
-    /** Datagrams discarded whole: shorter than the trailer, or a continuation with no frame in progress. */
+    /**
+     * Datagrams discarded whole: shorter than their header and trailer, or a continuation with no frame in
+     * progress.
+     */
     var datagramsDropped: Int = 0
         private set
 
     /**
      * Octets discarded without reaching an emitted frame: the full size of each dropped datagram, the
-     * buffered octets of each abandoned frame, and surplus octets trimmed off a completed frame. The
-     * stripped trailers of accepted datagrams are not counted.
+     * buffered octets of each abandoned frame, and surplus octets trimmed off a completed frame. The headers
+     * and trailers of accepted datagrams, and the stale octets after a chunk of known length, are not counted.
      */
     var bytesDropped: Long = 0
         private set
@@ -84,20 +100,22 @@ class LspVideoReassembler(
     /**
      * Processes one video datagram.
      *
-     * @param datagram a whole UDP payload as received (including its trailer); not modified or retained.
+     * @param datagram a whole UDP payload as received (including its header and trailer); not modified or
+     *   retained.
      * @return the frames completed by this datagram: empty, or one frame (an Annex-B access unit of exactly
      *   the announced H.264 length, an array the caller owns).
      */
     fun feed(datagram: ByteArray): List<ByteArray> {
-        if (datagram.size < LspVideo.PACKET_TRAILER) {
-            dropDatagram(datagram, "shorter than the trailer")
+        if (datagram.size < MIN_DATAGRAM) {
+            dropDatagram(datagram, "shorter than its header and trailer")
             return emptyList()
         }
         val payloadEnd = datagram.size - LspVideo.PACKET_TRAILER
+        checkSequence(sequenceOf(datagram))
 
         val start = findFramStart(datagram)
         if (start != null) {
-            abandonFrameInProgress(superseded = true)
+            abandonFrameInProgress("a new frame started", warning = true)
             frame = ByteArray(start.expectedH264Len)
             filled = 0
             append(datagram, start.rawStart, payloadEnd)
@@ -106,17 +124,40 @@ class LspVideoReassembler(
                 dropDatagram(datagram, "continuation with no frame in progress")
                 return emptyList()
             }
-            append(datagram, 0, payloadEnd)
+            append(datagram, LspVideo.DATAGRAM_HEADER, chunkEnd(datagram, payloadEnd))
         }
         return completedFrame()
     }
 
     /**
-     * Abandons the frame in progress, if any, under the same policy as a new frame starting; the counters
-     * are kept. Call it when the video stream restarts (new session, link loss).
+     * Abandons the frame in progress, if any, under the same policy as a new frame starting, and forgets the
+     * sequence number; the counters are kept. Call it when the video stream restarts (new session, link loss).
      */
     fun reset() {
-        abandonFrameInProgress(superseded = false)
+        abandonFrameInProgress("reset", warning = false)
+        lastSequence = null
+    }
+
+    /** Records [sequence] and drops the frame in progress when it does not follow the previous datagram's. */
+    private fun checkSequence(sequence: Int) {
+        val previous = lastSequence
+        lastSequence = sequence
+        if (previous == null || frame == null) return
+        val next = (previous + 1) and LspVideo.SEQUENCE_MASK
+        if (sequence != next) {
+            abandonFrameInProgress("a datagram was lost", warning = true, detail = " expectedSeq=$next gotSeq=$sequence")
+        }
+    }
+
+    /**
+     * Where a continuation's H.264 ends: after its chunk when the chunk header gives a length (never past the
+     * trailer), otherwise at the trailer.
+     */
+    private fun chunkEnd(datagram: ByteArray, payloadEnd: Int): Int {
+        val field = u16BigEndian(datagram, LspVideo.CHUNK_FIELD_OFFSET)
+        if ((field ushr Byte.SIZE_BITS) and LspVideo.CHUNK_TYPE_MASK != LspVideo.CHUNK_WITH_LENGTH) return payloadEnd
+        val length = (field and LspVideo.CHUNK_LENGTH_MASK) + 1
+        return minOf(LspVideo.DATAGRAM_HEADER + length, payloadEnd)
     }
 
     /** Copies `datagram[from, to)` into the frame buffer, trimming what does not fit. */
@@ -151,17 +192,19 @@ class LspVideoReassembler(
     /**
      * Drops the frame in progress, if any, per the incomplete-frame policy.
      *
-     * @param superseded true when a new frame started (data was lost: logged as a warning), false for an
-     *   explicit [reset] (expected: logged at debug level).
+     * @param reason why, for the log.
+     * @param warning true when data was lost (logged as a warning), false for an explicit [reset] (expected:
+     *   logged at debug level).
+     * @param detail extra `key=value` pairs for the log line, each with a leading space.
      */
-    private fun abandonFrameInProgress(superseded: Boolean) {
+    private fun abandonFrameInProgress(reason: String, warning: Boolean, detail: String = "") {
         val abandoned = frame ?: return
         framesDropped++
         bytesDropped += filled
-        if (superseded) {
-            log.w { "abandonFrameInProgress(): incomplete frame dropped, a new frame started -> have=$filled expected=${abandoned.size}" }
+        if (warning) {
+            log.w { "abandonFrameInProgress(): incomplete frame dropped, $reason -> have=$filled expected=${abandoned.size}$detail" }
         } else {
-            log.d { "abandonFrameInProgress(): incomplete frame dropped on reset -> have=$filled expected=${abandoned.size}" }
+            log.d { "abandonFrameInProgress(): incomplete frame dropped on $reason -> have=$filled expected=${abandoned.size}$detail" }
         }
         frame = null
         filled = 0
@@ -173,7 +216,17 @@ class LspVideoReassembler(
         log.d { "feed(): datagram dropped -> reason=$reason size=${datagram.size}" }
     }
 
+    private fun sequenceOf(datagram: ByteArray): Int =
+        ((datagram[LspVideo.SEQUENCE_OFFSET].toInt() and 0xFF) shl 16) or
+            u16BigEndian(datagram, LspVideo.SEQUENCE_OFFSET + 1)
+
+    private fun u16BigEndian(datagram: ByteArray, offset: Int): Int =
+        ((datagram[offset].toInt() and 0xFF) shl Byte.SIZE_BITS) or (datagram[offset + 1].toInt() and 0xFF)
+
     private companion object {
         private const val TAG = "LspVideoReassembler"
+
+        /** The smallest datagram that can carry anything: its header and its trailer. */
+        private const val MIN_DATAGRAM = LspVideo.DATAGRAM_HEADER + LspVideo.PACKET_TRAILER
     }
 }

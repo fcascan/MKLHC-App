@@ -287,7 +287,9 @@ class LspPacketTest {
 
     @Test
     fun `the builder reproduces the literal vectors`() {
-        // Guards the helper the other tests rely on: 63 and 93 octets, tag at the stated offsets.
+        // Guards the helper the other tests rely on: 63 and 93 octets, tag at the stated offsets. The literal
+        // vectors above use 0x11 / 0x33 filler where the builder writes the datagram and chunk headers; the
+        // FRAM rules never read those octets, so both shapes give the same start.
         val at13 = startAt13(framSizeFor(8), IDR_8)
         val at43 = startAt43(framSizeFor(8), IDR_8)
 
@@ -314,7 +316,7 @@ class LspPacketTest {
 
     @Test
     fun `a FRAM at 13 needs no L2 block`() {
-        // The 0x11 filler where an L2 block would be is not one, yet the FRAM at 13 is accepted.
+        // The chunk header where an L2 block would be is not one, yet the FRAM at 13 is accepted.
         val pkt = startAt13(framSizeFor(8), IDR_8)
 
         assertFalse(l2ChecksumOk(pkt, 8), "there is no L2 block in this datagram")
@@ -431,7 +433,7 @@ class LspPacketTest {
 
     @Test
     fun `a datagram without a FRAM tag is not a start`() {
-        assertNull(findFramStart(LspTestVectors.continuation(IDR_8 + ByteArray(60) { 0x55 })))
+        assertNull(findFramStart(LspTestVectors.continuation(IDR_8 + ByteArray(60) { 0x55 }, seq = 1)))
         assertNull(findFramStart(ByteArray(0)))
         assertNull(findFramStart(ByteArray(100) { 0x55 }))
     }

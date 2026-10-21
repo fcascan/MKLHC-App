@@ -1,18 +1,35 @@
 // Adapted from mk-live https://github.com/olus85/mk-live, src/mk_live/video_worker.py (MIT).
+// The datagram header constants (DATAGRAM_HEADER and below) are original: measured from the kart's stream on
+// 2026-10-21 with the desktop app's raw video dump, not taken from the reference.
 package com.mklhc.core.kart_protocol.video
 
 /**
  * Constants of the kart's UDP video stream ("LSP" datagrams carrying "FRAM" records).
  *
- * Business logic: the kart streams H.264 video as UDP datagrams to the app's video port. A datagram
- * that opens a video frame carries a "FRAM" record whose big-endian size field covers the 32-octet FRAM
- * header plus two meta octets, followed by the first part of the H.264 access unit; a frame larger than
- * one datagram continues in header-less datagrams that carry only H.264 bytes. Every datagram, start or
- * continuation, ends with an 8-octet trailer that is not H.264 and has to be removed.
+ * Business logic: the kart streams H.264 video as UDP datagrams to the app's video port, every one of them
+ * 1416 octets. Each datagram starts with a 13-octet header and ends with an 8-octet trailer, neither of which is
+ * H.264:
  *
- * The values are the ones the reference implementation uses; the FRAM offsets, the trailer length and
- * the size overhead are confirmed only by that reference and still have to be checked against hardware
- * captures (see [LspVideoReassembler]).
+ * ```
+ * 0..1    ec c1
+ * 2..4    sequence number, 24 bits big-endian, +1 per datagram (wraps)
+ * 5       group number, +1 per group; 6 datagrams in the group (up to 14); 7 index in the group
+ * 8..12   chunk header; octets 11-12 hold the chunk type (top 5 bits) and an 11-bit length
+ * ```
+ *
+ * A datagram that opens a video frame carries a "FRAM" record right after the header, whose chunk header reads
+ * `80 1f`; a keyframe's first datagram instead has an "L2" block at octet 8, in place of the chunk header, and its
+ * FRAM record at 43. The FRAM record's big-endian size field covers the 32-octet FRAM header plus two meta octets, followed by
+ * the first part of the H.264 access unit. The rest follows in continuation datagrams: with chunk type
+ * [CHUNK_WITH_LENGTH] (`85 72` on a full one) the chunk holds `length + 1` H.264 octets right after the header;
+ * the last datagram of a group has another type (`ba 00`, `b6 00`, `be 00`) and no length, so its H.264 runs
+ * from the header to the trailer, and the frame's FRAM length cuts off the stale octets the kart pads it with.
+ * A keyframe spans several groups, so a group is not a frame.
+ *
+ * Provenance of the values: the FRAM offsets, the size overhead and the trailer come from the reference; the
+ * header and chunk layout were measured on 2,185 frames: 2,171 end exactly in their last datagram under this
+ * layout; the 14 holding a continuation of odd length complete one datagram early and may be one octet off, an
+ * open question.
  */
 object LspVideo {
     /**
@@ -38,6 +55,27 @@ object LspVideo {
 
     /** Offset of the "L2" checksum block that guards a FRAM tag at [FRAM_OFFSET_WITH_L2]. */
     const val L2_OFFSET = 8
+
+    /** Octets of the header every video datagram starts with: 8 octets of datagram header, 5 of chunk header. */
+    const val DATAGRAM_HEADER = 13
+
+    /** Offset of the 24-bit big-endian sequence number in the datagram header. */
+    const val SEQUENCE_OFFSET = 2
+
+    /** The sequence number's range: it wraps from this value to 0. */
+    const val SEQUENCE_MASK = 0xFF_FFFF
+
+    /** Offset of the chunk header's type-and-length field (two octets, big-endian). */
+    const val CHUNK_FIELD_OFFSET = 11
+
+    /** The top 5 bits of [CHUNK_FIELD_OFFSET]'s first octet: the chunk type. */
+    const val CHUNK_TYPE_MASK = 0xF8
+
+    /** Chunk type of a chunk that gives its length (`80 1f` before a FRAM record, `85 72` on a continuation). */
+    const val CHUNK_WITH_LENGTH = 0x80
+
+    /** The chunk length bits of the two-octet field; a chunk holds `length + 1` octets. */
+    const val CHUNK_LENGTH_MASK = 0x7FF
 
     /**
      * NAL unit types that count as a genuine Annex-B start: 1 (non-IDR slice), 5 (IDR slice), 7 (SPS),

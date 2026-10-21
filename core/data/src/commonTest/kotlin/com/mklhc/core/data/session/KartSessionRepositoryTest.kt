@@ -948,9 +948,10 @@ private fun u16LittleEndian(bytes: ByteArray, offset: Int): Int =
     (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
 
 /**
- * Builds a one-datagram video frame with a "FRAM" record at offset 13: filler, the length octet, the tag,
- * the big-endian FRAM size, filler, the H.264 bytes, then the 8-octet trailer. The length octet 0x1f makes
- * the H.264 start exactly [LspVideo.FRAM_SIZE_OVERHEAD] octets after the tag (`13 - 1 + 0x1f + 4 = 47`).
+ * Builds a one-datagram video frame with a "FRAM" record at offset 13: filler where the datagram and chunk
+ * headers go, the length octet, the tag, the big-endian FRAM size, filler, the H.264 bytes, then the 8-octet
+ * trailer. The length octet 0x1f makes the H.264 start exactly [LspVideo.FRAM_SIZE_OVERHEAD] octets after the
+ * tag (`13 - 1 + 0x1f + 4 = 47`). A one-datagram frame needs no particular sequence number.
  */
 private fun videoStartDatagram(h264: ByteArray): ByteArray {
     val framSize = h264.size + LspVideo.FRAM_SIZE_OVERHEAD
