@@ -419,7 +419,7 @@ The desktop `VideoSurface` decodes the kart's H.264 with FFmpeg 8.1.2 through `o
 The stream is H.264 High profile, CABAC, 8x8 transform, 1280x800 at 30 fps: no pure-Java decoder handles it (jcodec is Main profile only), and VLC/GStreamer bindings need a system install. FFmpeg decodes it in about 3.3 ms per picture including the BGRA conversion. LGPL with unmodified dynamically loaded libraries is compatible with the app's AGPL-3.0; THIRD_PARTY_NOTICES lists FFmpeg and JavaCPP.
 
 ### Verified
-Tests decode synthetic I_PCM streams written by the project (`SyntheticH264`, no recorded video, no encoder). A throwaway replay of the 90 s live capture through the Kotlin reassembler and this decoder gave 2,700 pictures from 2,700 frames with no FFmpeg warning. Not yet seen live in the cockpit window.
+Tests decode synthetic I_PCM streams written by the project (`SyntheticH264`, no recorded video, no encoder). A throwaway replay of the 90 s live capture through the Kotlin reassembler and this decoder gave 2,700 pictures from 2,700 frames with no FFmpeg warning. Seen live on 2026-10-21 (commit 9bae5f1): the paired kart joined on Start and the camera showed in the cockpit; no FFmpeg warning in the surviving log, one orphan end-of-frame datagram dropped (the known quirk), decoder released and beacon off at the window close.
 
 ### Files
 - core/video/src/desktopMain/kotlin/com/mklhc/core/video/H264FrameDecoder.kt
