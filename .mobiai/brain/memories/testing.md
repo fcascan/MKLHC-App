@@ -101,3 +101,31 @@ The PC's internal MT7922 saw the beacon on air in the first forced scan (WlanSca
 - app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeRunner.kt
 - core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/NetstackNode.kt
 - docs/HARDWARE_SETUP.md
+
+## Hardware run: the kart answers ARP and completes the RCD pairing handshake on TCP 5201
+
+- id: hardware-run-the-kart-answers-arp-and-completes-the-rcd-pair-20261021-014819
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-21
+
+### Result (hardware, 2026-10-20, TP-Link Archer T3U on WinUSB, channel 6, kart in pairing mode)
+GO for the pairing TCP on 5201 with the real link layer (RadioAccessPoint + NetstackNode, commit 46612ba). Over about 8 minutes and some 55 cycles (13 decrypted frames each), every cycle: `auth` and `assoc` with `retry=0` (rssiDbm 69-85 as reported by radiod), DHCP OFFER/ACK broadcast and lease taken, TCP SYN to 169.254.98.65:5201 accepted (`pairing TCP accepted`), and the RCD pairing handshake completed (version 2; the kart presents its device name). The ARP who-has for the app (`answering who-has`) appeared only in the first cycle: the kart caches the app's MAC across its resets.
+
+### Kart behaviour observed
+- After the handshake the app does not connect to the kart's pairing service (the spike never sends SetGroupInfo), and the kart closes the RCD connection (FIN), releases the lease and deauthenticates with reason 3 within a few seconds, then starts over. The spike frees the lease and resets the stale connection each time.
+- Each cycle uses a new TCP source port (56429, 56430, ...); after the kart restarted mid-run the port series jumped (to 42558), a quick way to spot a kart reboot in the log.
+- `CCMP rejected a frame ... retry=true reason=PN replay detected` shows up a few times: the kart retransmitting frames already received; harmless.
+- The QR was shown from the spike's SVG file in the browser pane; the console QR printed as `?` under Gradle, as expected.
+
+### Not verified / issues
+- Station inactivity drop: not observed. The kart was switched off but apparently restarted within 20 s (cycles kept coming), so no `station inactive, dropped` line; repeat with the kart left off for at least 30 s.
+- Clean stop: an Enter typed in the app's Terminal panel never reached the spike under Gradle (the run kept cycling), so it was stopped with Ctrl+C, which under Gradle on Windows ends the JVM without its shutdown hook; the T3U was then unplugged and three WLAN scans confirmed the beacon off air. Prefer `--duration` until the spike gets a stop path that does not depend on Gradle forwarding stdin.
+- The kart's stored pairing after these handshakes was not checked.
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikePairingProbe.kt
+- core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
+- docs/HARDWARE_SETUP.md

@@ -138,7 +138,9 @@ always dark on light. Never upload the image or paste the hex payload into an on
 of the run.
 
 Press **Enter** to stop (or use `--duration`). Stopping asks `radiod` to shut the radio down, which also stops the
-beacon.
+beacon. The Enter has to reach the spike through Gradle: if the run keeps going after it (on 2026-10-20 an Enter typed in
+the app's Terminal panel never arrived), prefer `--duration` for the next run. Ctrl+C under Gradle on Windows ends the
+spike without its cleanup, so after it unplug the adapter to stop the beacon (see the last row of the table below).
 
 ### Bringing the radio up (no kart needed)
 
@@ -180,7 +182,11 @@ the game network's name and key (the `SetGroupInfo` command); the spike never do
 pairing request that stores the game network, the kart should keep the pairing it has stored, and a kart that was paired
 before should stay paired. After the handshake the kart is expected to wait about five seconds for the app to do that
 (the design's timeout: the kart resets if the app does not connect within 5 s after the handshake), give up, release the
-lease, deauthenticate and start over, so the milestones repeat every few seconds. That loop is expected. When the kart
+lease, deauthenticate and start over, so the milestones repeat every few seconds. That loop is expected, and it is what
+the hardware run of 2026-10-20 showed: every cycle reached the handshake, then the kart released the lease, closed the
+connection and deauthenticated (reason 3). The ARP question appears only in the first cycle, because the kart keeps the
+app's address in its cache. A few `CCMP rejected a frame ... retry=true reason=PN replay detected` warnings are the
+kart's retransmissions of frames already received, and are harmless. When the kart
 drops off, the spike frees the DHCP lease and aborts the kart's stale TCP connection, which the network stack logs at
 `INFO` level as `abortWithReset(): resetting the connection at the application's request`. A kart that goes quiet
 without deauthenticating (switched off or out of range) is dropped once nothing has arrived from it for 20 seconds: the
@@ -221,7 +227,7 @@ The capture contains the kart's traffic. Keep it out of the repository (`spike-c
 | The beacon runs but the kart never joins | Make sure the kart is in pairing mode and sees the QR code, try another `--channel`, move the adapter close to the kart, and try `--beacon-interval 50` or a higher `--tx-power`. Association needs a signal in both directions. |
 | `auth` appears with `retry=1` | The kart's frames were not acknowledged in time. Try a different channel or a closer position. |
 | The kart joins but no `first data frame decrypted` appears | Look for `CCMP rejected a frame` in the log: the key does not match, which usually means a stale QR code was scanned. Restart the spike and scan the new one. |
-| The kart takes its address but `answering who-has` does not appear | The kart did not get the DHCP ACK (look for `lease acknowledged`), or its ARP frame was not received. Try a closer position. |
+| The kart takes its address but `answering who-has` does not appear | Normal after the first cycle: the kart caches the app's address, so only the first association asks. If not even the first one does and `pairing TCP accepted` never follows, the kart did not get the DHCP ACK (look for `lease acknowledged`) or its ARP frame was not received. Try a closer position. |
 | `answering who-has` appears but `pairing TCP accepted` does not | The kart's connection to port 5201 did not complete. Run with `--verbose` and look at the `TcpEndpoint` and `TcpConnection` lines; the SYN-ACK has to reach the kart, so try a closer position. |
 | The beacon keeps airing after the spike was killed | Stop the spike with Enter or `--duration` so `radiod` can stop the beacon. RTL8822BU / RTL8812BU adapters (such as the Archer T3U) keep beaconing after a hard kill until they are unplugged, so unplug the adapter in that case. |
 
