@@ -144,7 +144,7 @@ GO for the complete pairing from the desktop app. First attempt (commit 7c04f58)
 
 ### Kart behaviour observed
 - Telemetry type 3 (87 octets) arrives about every 100 ms and is not decoded yet (`type 3 telemetry is not specified yet`).
-- Video: the reassembler trims surplus octets at the end of nearly every frame (surplus 33-1376, frames 8,000-12,000 octets) and now and then drops a continuation with no frame in progress, so the frame length or the datagram layout it assumes is off. The desktop cockpit has no H.264 decoder by design (it only counts access units), so no picture was expected there. Next: a raw video-datagram dump to study the layout.
+- Video: the reassembler trims surplus octets at the end of nearly every frame (surplus 33-1376, frames 8,000-12,000 octets) and now and then drops a continuation with no frame in progress, so the frame length or the datagram layout it assumes is off. The desktop cockpit has no H.264 decoder by design (it only counts access units), so no picture was expected there. Cause found with a raw dump: every continuation starts with a 13-octet header the reassembler keeps (see "Video datagram layout measured from a raw dump").
 
 ### Not verified / issues
 - The pairing log lines (connectToKart refusals, group info sent, paired kart remembered) scrolled out of the Terminal panel's 1,000-line buffer before they were read: the debug log of every decrypted frame floods it. Keep a log file, or lower that per-frame line, for the next run.
@@ -154,3 +154,24 @@ GO for the complete pairing from the desktop app. First attempt (commit 7c04f58)
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
 - core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/video/LspVideoReassembler.kt
 - core/video/src/desktopMain/kotlin/com/mklhc/core/video/VideoSurface.desktop.kt
+
+## Video datagram layout measured from a raw dump: every datagram has a 13-octet header
+
+- id: video-datagram-layout-measured-from-a-raw-dump-20261021
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: video
+- date: 2026-10-21
+
+### Capture
+`MKLHC_VIDEO_DUMP=spike-captures\video` (commit b4ad353), game session on the paired kart, 72.8 s: 20,345 datagrams, all 1416 octets (the kart pads the last one of a frame with stale buffer content), 2,185 frames (2,112 with FRAM at octet 13, 73 keyframes with the L2 block and FRAM at 43), no loss. The analysis scripts were throwaway Python over the dump format.
+
+### Layout (confirmed on every datagram)
+- Octets 0-1 `ec c1`; 2-4 a big-endian datagram sequence number, +1 per datagram; 5 a group number, +1 per group; 6 the datagrams in the group (up to 14), 7 the index in it (0-based); 10 repeats octet 4. A keyframe spans several groups, so a group is not a video frame.
+- Octets 8-12 of a plain datagram are a 5-octet chunk header ending in a 2-octet field at 11-12: `80 1f` before a FRAM record (0x1f = 31, the length octet the reassembler already uses for rawStart), `85 72` on a full continuation, `ba 00`/`ba 01`/`b6 00`/`be 00` on the last datagram of a group. A keyframe start has the L2 block at 8 and the same 5-octet pattern right before FRAM at 43.
+- H.264 in a continuation starts at octet 13. With octet 11 = 0x85 it is `(octets 11-12 & 0x7FF) + 1` octets (1395 normally; 1391-1394 in 10 datagrams); the last datagram of a frame carries the rest from octet 13, cut by the FRAM length. The 8-octet trailer and the padding are not H.264.
+- Check: under that model 2,171 of 2,185 frames end exactly in their last datagram, and the octet there is always an rbsp stop byte (80, c0, 40, 60, e0, 20, a0) followed by 00 00, the end of a slice. The other 14 are off by 0 or 1 octet and are exactly the frames holding an odd-length (0x56e-0x571) continuation: still open.
+
+### What it means for LspVideoReassembler
+It appends continuations from octet 0, so every continuation adds 13 header octets to the frame: the frame fills early (the surplus seen in the logs), the frame comes out corrupt, and a trailing continuation is sometimes dropped as having no frame in progress. The fix: skip the 13-octet header of every continuation (taking the 0x85 length when present), and use the sequence number to detect a lost datagram, which the reference had no way to do.
