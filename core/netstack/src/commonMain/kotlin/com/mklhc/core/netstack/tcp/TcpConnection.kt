@@ -37,6 +37,12 @@ import kotlin.time.Duration
  * and (c) the application via [connect], [write], [read] and [close]. Nothing else touches the
  * state, so no locks are needed.
  *
+ * Termination: the endpoint can end a connection from outside the actor ([resetByPeerRestart],
+ * [discardQuietly]) while events are still queued for it, or while the actor is suspended in a send. Once
+ * terminated, the actor settles every queued event without acting on it (a connect or write fails with the
+ * terminal exception, a close or abort is already done, a segment or timer is dropped), and nothing can send
+ * a segment, re-arm a timer or move the state out of [TcpState.CLOSED] again.
+ *
  * Reliability: outbound data is cut into segments of at most [TcpConfig.mss] octets (Nagle is
  * disabled, so data is sent promptly) and kept on a retransmission queue until the cumulative ACK
  * covers them. A single retransmission timer, starting at [TcpConfig.initialRto] and doubling on
@@ -66,9 +72,12 @@ class TcpConnection internal constructor(
     private val send: suspend (TcpSegment) -> Unit,
     initialState: TcpState,
     private val onEstablished: ((TcpConnection) -> Unit)?,
-    private val onClosed: (() -> Unit)?,
+    private val onClosed: ((TcpConnection) -> Unit)?,
 ) {
     private val log = Logger.withTag(TAG)
+
+    /** True for a connection a listener opened for an inbound SYN (it starts in [TcpState.LISTEN]), false for an active open. */
+    internal val isPassive: Boolean = initialState == TcpState.LISTEN
 
     private val _state = MutableStateFlow(initialState)
 
@@ -188,6 +197,8 @@ class TcpConnection internal constructor(
     /**
      * Closes the sending half gracefully (sends a FIN) and returns once the close is initiated. The
      * state machine completes the four-way handshake in the background; observe [state] for the rest.
+     * A connection that was never connected ends at once with nothing sent: a pending [read] sees the end
+     * of the stream and the endpoint frees the local port.
      * Idempotent: a no-op that returns normally once the connection is already terminally closed.
      */
     suspend fun close() {
@@ -198,13 +209,25 @@ class TcpConnection internal constructor(
 
     /**
      * Aborts the connection: sends a RST, moves to [TcpState.CLOSED] at once, and surfaces a
-     * [TcpResetException] to any pending or future [read]. Returns once the abort is done.
+     * [TcpResetException] to any pending or future [read]. Returns once the abort is done. A connection
+     * that was never connected sends no RST (there is no peer to tell); the endpoint frees its local port
+     * all the same.
      * Idempotent: a no-op that returns normally once the connection is already terminally closed.
      */
     suspend fun abort() {
         val result = CompletableDeferred<Unit>()
         if (!offerEvent(DoAbort(result))) return // already terminally closed: idempotent no-op
         result.await()
+    }
+
+    /**
+     * Queues an [abort] without waiting for it, for callers that cannot suspend: the listener resetting a
+     * connection nobody will accept, and the endpoint resetting a handshake whose listener closed. A no-op
+     * once the connection has terminated.
+     */
+    internal fun abortSoon() {
+        if (terminated) return
+        events.trySend(DoAbort(CompletableDeferred()))
     }
 
     /**
@@ -228,6 +251,10 @@ class TcpConnection internal constructor(
     // ---- actor --------------------------------------------------------------------------------
 
     private suspend fun process(event: Event) {
+        if (terminated) {
+            settleAfterTermination(event)
+            return
+        }
         when (event) {
             is Inbound -> onInbound(event.segment)
             is DoConnect -> onConnect(event.result)
@@ -237,6 +264,23 @@ class TcpConnection internal constructor(
             RtoFired -> onRtoFired()
             KeepaliveProbe -> onKeepaliveProbe()
             TimeWaitElapsed -> enterClosed(null)
+        }
+    }
+
+    /**
+     * Settles an event that was queued before the connection terminated and is only reached now, typically after
+     * the endpoint ended it from outside the actor: a connect or write fails with the exception a later call gets
+     * (the reset cause, if any), a close or abort is already done, and a segment or a timer expiry has nothing
+     * left to act on. Without this a queued RtoFired would retransmit to the stale peer port and re-arm its timer,
+     * and a queued connect would reopen the CLOSED connection.
+     */
+    private fun settleAfterTermination(event: Event) {
+        when (event) {
+            is DoConnect -> event.result.completeExceptionally(terminalException())
+            is DoWrite -> event.result.completeExceptionally(terminalException())
+            is DoClose -> event.result.complete(Unit)
+            is DoAbort -> event.result.complete(Unit)
+            is Inbound, RtoFired, KeepaliveProbe, TimeWaitElapsed -> { /* nothing left to act on */ }
         }
     }
 
@@ -277,14 +321,26 @@ class TcpConnection internal constructor(
                 flush()
             }
             TcpState.LISTEN, TcpState.SYN_SENT, TcpState.SYN_RECEIVED -> abortWithReset(null)
-            else -> { /* already closing or closed */ }
+            TcpState.CLOSED -> endNeverConnected(null)
+            else -> { /* already closing */ }
         }
         result.complete(Unit)
     }
 
     private suspend fun onAbort(result: CompletableDeferred<Unit>) {
-        if (_state.value != TcpState.CLOSED) abortWithReset(null)
+        if (_state.value == TcpState.CLOSED) endNeverConnected(TcpResetException("connection aborted")) else abortWithReset(null)
         result.complete(Unit)
+    }
+
+    /**
+     * Ends a connection that was opened but never connected. The actor only sees [TcpState.CLOSED] before
+     * termination on an active open whose [connect] was never processed, so nothing was ever sent and there is no
+     * peer to reset: it terminates quietly, and its [onClosed] frees the local port so the next open of that port
+     * succeeds. A null [cause] is a [close] (readers see the end of the stream); a cause is an [abort].
+     */
+    private fun endNeverConnected(cause: TcpResetException?) {
+        log.i { "endNeverConnected(): ending a connection that never connected, no RST -> localPort=$localPort peer=$peer:$peerPort aborted=${cause != null}" }
+        enterClosed(cause)
     }
 
     // ---- inbound segment processing -----------------------------------------------------------
@@ -506,24 +562,33 @@ class TcpConnection internal constructor(
         ensureRtoRunning()
     }
 
+    // transmit, sendPureAck and sendKeepaliveProbe send nothing once terminated: a handler that was suspended in a
+    // send when the endpoint ended the connection must not keep talking to the old peer port when it resumes.
     private suspend fun transmit(out: OutSegment) {
+        if (terminated) return
         val flags = if (ackValid) out.flags or TcpSegment.ACK else out.flags
         val ack = if (ackValid) rcvNxt else 0L
         send(TcpSegment(localPort, peerPort, out.seq, ack, flags, config.receiveWindow, out.data, out.mss))
     }
 
     private suspend fun sendPureAck() {
-        if (!ackValid) return
+        if (terminated || !ackValid) return
         send(TcpSegment(localPort, peerPort, sndNxt, rcvNxt, TcpSegment.ACK, config.receiveWindow))
     }
 
     private suspend fun sendKeepaliveProbe() {
+        if (terminated) return
         send(TcpSegment(localPort, peerPort, add(sndNxt, -1), rcvNxt, TcpSegment.ACK, config.receiveWindow))
     }
 
     private suspend fun sendRst() {
+        send(rstSegment())
+    }
+
+    /** The RST that tells the peer to drop this connection: our next sequence number, acknowledging once a SYN was seen. */
+    private fun rstSegment(): TcpSegment {
         val flags = if (ackValid) TcpSegment.RST or TcpSegment.ACK else TcpSegment.RST
-        send(TcpSegment(localPort, peerPort, sndNxt, rcvNxt, flags, 0))
+        return TcpSegment(localPort, peerPort, sndNxt, rcvNxt, flags, 0)
     }
 
     // ---- lifecycle transitions ----------------------------------------------------------------
@@ -563,6 +628,11 @@ class TcpConnection internal constructor(
         enterClosed(cause)
     }
 
+    /**
+     * Terminal transition to [TcpState.CLOSED]: stops every timer, fails the pending [connect] and the readers
+     * with [cause] (or ends the stream cleanly when it is null), tells the owner through [onClosed] (the endpoint
+     * frees the local port if this connection still holds it) and closes the event channel. Runs once.
+     */
     private fun enterClosed(cause: TcpResetException?) {
         if (terminated) return
         terminated = true
@@ -578,25 +648,45 @@ class TcpConnection internal constructor(
             closeReceiveStream(null)
         }
         connectResult = null
-        onClosed?.invoke()
+        onClosed?.invoke(this)
         events.close()
     }
 
     /**
-     * Tears this TCB down with no RST and no [onClosed] callback, for a connection in [TcpState.TIME_WAIT]
-     * that a new incarnation replaces (RFC 9293 section 3.10.7.4 reopen). The [TcpEndpoint] removes it
-     * from its table and opens a fresh passive connection for the reopening SYN; it must not route that
-     * SYN here, where TIME_WAIT would merely re-acknowledge it.
+     * Ends this connection as if the peer had reset it, because the same peer is opening a new connection to
+     * this listening port from another source port: it restarted, so this one is stale.
+     *
+     * Business logic: it does what a received RST does (see [handleRst]): the state becomes
+     * [TcpState.CLOSED], all timers stop, a pending [connect] and any blocked or later [read] fail with a
+     * [TcpResetException], and a later [write] fails with the same exception. [onClosed] frees the local port
+     * before the [TcpEndpoint] installs the replacement there. A RST goes to the old peer port, so a peer that
+     * did not really restart learns that this connection is gone, but only when there is acknowledgment state
+     * to build it from: a connection still in [TcpState.LISTEN] (its actor has not processed the peer's SYN
+     * yet) sends none, since a RST with sequence 0 and no ACK would be meaningless, and a connection already in
+     * [TcpState.TIME_WAIT] is just discarded (the peer closed it cleanly). Like [discardQuietly] it runs on the
+     * endpoint's coroutine, not on the actor (the actor then settles its queued events without acting on them),
+     * and does nothing once the connection has terminated. The endpoint logs the replacement.
+     */
+    internal suspend fun resetByPeerRestart() {
+        if (terminated) return
+        if (_state.value == TcpState.TIME_WAIT) {
+            discardQuietly()
+            return
+        }
+        val rst = if (ackValid) rstSegment() else null
+        log.d { "resetByPeerRestart(): ending the stale connection -> state=${_state.value} localPort=$localPort peer=$peer:$peerPort sendsRst=${rst != null}" }
+        enterClosed(TcpResetException("connection reset by peer"))
+        if (rst != null) send(rst)
+    }
+
+    /**
+     * Tears this TCB down with no RST, for a connection in [TcpState.TIME_WAIT] that a new incarnation replaces
+     * (RFC 9293 section 3.10.7.4 reopen). Readers see the end of the stream and [onClosed] frees the local port,
+     * so the [TcpEndpoint] opens a fresh passive connection for the reopening SYN; it must not route that SYN
+     * here, where TIME_WAIT would merely re-acknowledge it.
      */
     internal fun discardQuietly() {
-        if (terminated) return
-        terminated = true
-        setState(TcpState.CLOSED)
-        stopRto()
-        stopKeepalive()
-        stopTimeWait()
-        closeReceiveStream(null)
-        events.close()
+        enterClosed(null)
     }
 
     private fun deliverData(data: ByteArray) {
@@ -619,8 +709,10 @@ class TcpConnection internal constructor(
         }
     }
 
+    // restartRto, startKeepalive and startTimeWait arm nothing once terminated, for the same reason as transmit.
     private fun restartRto(rto: Duration) {
         rtoJob?.cancel()
+        if (terminated) return
         rtoJob = scope.launch {
             delay(rto)
             if (isActive) events.trySend(RtoFired)
@@ -654,6 +746,7 @@ class TcpConnection internal constructor(
 
     private fun startKeepalive() {
         stopKeepalive()
+        if (terminated) return
         _keepaliveProbesSent.value = 0
         keepaliveJob = scope.launch {
             delay(config.keepaliveIdle)
@@ -685,6 +778,7 @@ class TcpConnection internal constructor(
 
     private fun startTimeWait() {
         stopTimeWait()
+        if (terminated) return
         timeWaitJob = scope.launch {
             delay(config.timeWait)
             if (isActive) events.trySend(TimeWaitElapsed)
@@ -701,6 +795,8 @@ class TcpConnection internal constructor(
     private fun setState(next: TcpState) {
         val previous = _state.value
         if (previous == next) return
+        // Terminal CLOSED is final: a handler resuming after an off-actor termination must not revive the state.
+        if (terminated && next != TcpState.CLOSED) return
         if (previous == TcpState.ESTABLISHED && next != TcpState.ESTABLISHED) stopKeepalive()
         _state.value = next
     }

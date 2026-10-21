@@ -339,7 +339,7 @@ The link layer the network stack runs on is `RadioAccessPoint` in :core:wifi-ap:
 
 ### Known gaps (follow-ups)
 - After radiod is relaunched by the supervisor, RadioKartRadioAp does not redo bring-up/serve (start() and beacon(GAME) short-circuit); documented as TODO(production wiring).
-- The TCP endpoint keeps one connection per local port and drops a SYN from a new source port while the old connection holds it; the orchestrator does not watch associatedStation during a session, so a kart that resets without FIN/RST cannot reconnect until RTO/keepalive ends the stale connection. The spike aborts its pairing connection when the station leaves for this reason.
+- The TCP endpoint keeps one connection per local port and drops a SYN from a new source port while the old connection holds it; the orchestrator does not watch associatedStation during a session, so a kart that resets without FIN/RST cannot reconnect until RTO/keepalive ends the stale connection. The spike aborts its pairing connection when the station leaves for this reason. (Fixed in the follow-up: see the bugfix "A kart that leaves mid-session wedged recovery".)
 - The spike serves the RCD pairing handshake on 5201 but never connects to the kart's pairing service or sends SetGroupInfo, so the kart keeps its stored pairing.
 
 ### Files

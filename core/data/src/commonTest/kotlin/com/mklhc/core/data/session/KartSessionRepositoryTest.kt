@@ -4,19 +4,26 @@ import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.data.identity.deriveKartIdentity
 import com.mklhc.core.data.radio.AdapterState
 import com.mklhc.core.data.radio.FakeKartRadioAp
+import com.mklhc.core.data.radio.KartRadioAp
 import com.mklhc.core.data.store.InMemoryPairingStore
+import com.mklhc.core.data.store.PairingStore
 import com.mklhc.core.domain.KartNetworkKind
 import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.LinkState
+import com.mklhc.core.domain.PairedKart
 import com.mklhc.core.kart_protocol.teleop.DriveCommand
 import com.mklhc.core.kart_protocol.telemetry.Telemetry
 import com.mklhc.core.kart_protocol.video.LspVideo
 import com.mklhc.core.kart_protocol.video.Lvni
+import com.mklhc.core.netstack.tcp.TcpState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.FlowCollector
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -24,11 +31,15 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import kotlin.time.ComparableTimeMark
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -38,8 +49,8 @@ import kotlin.test.assertTrue
  * over the real [com.mklhc.core.netstack.NetstackNode] + RCD + Fuji stack across the paired in-memory
  * FrameLink: a [FakeKart] completes the real RCD handshake, answers the real control exchange, receives
  * the real teleop datagrams and is handed the app's real LVNI keepalive. The other tests pin the state
- * mapping, teleop safety, telemetry/video surfacing, pairing, recovery and teardown. Everything runs under
- * virtual time via `runTest`.
+ * mapping, teleop safety, telemetry/video surfacing, pairing, recovery, the kart leaving the network and
+ * teardown. Everything runs under virtual time via `runTest`.
  */
 class KartSessionRepositoryTest {
 
@@ -62,12 +73,16 @@ class KartSessionRepositoryTest {
         val kart: FakeKart,
     )
 
-    private fun TestScope.harness(settings: KartSettings = KartSettings.DEFAULT, scope: CoroutineScope = backgroundScope): Harness {
+    private fun TestScope.harness(
+        settings: KartSettings = KartSettings.DEFAULT,
+        scope: CoroutineScope = backgroundScope,
+        radioSeenByRepo: (FakeKartRadioAp) -> KartRadioAp = { it },
+    ): Harness {
         val radio = FakeKartRadioAp()
         val store = store(settings)
         // The deadman and the connect window measure real elapsed time; the real monotonic clock does not
         // advance with virtual time, so give the repository the test scheduler's virtual time source.
-        val repo = KartSessionRepository(radio, store, crypto, scope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        val repo = KartSessionRepository(radioSeenByRepo(radio), store, crypto, scope, clock = fixedClock, timeSource = testScheduler.timeSource)
         val kart = FakeKart(radio, masterSecret(), scope, crypto)
         kart.start()
         return Harness(radio, store, repo, kart)
@@ -283,6 +298,268 @@ class KartSessionRepositoryTest {
         refresher.cancel()
     }
 
+    // ---- kart departure -----------------------------------------------------------------------
+
+    @Test
+    fun aKartThatLeavesWhileDrivingLosesTheSessionAndDrivesAgainWhenItReturns() = runTest {
+        val h = harness()
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+        h.kart.requestLease()
+        awaitCondition { h.repo.dhcpServer?.boundClientMac != null }
+        // Every session connection is up, the video control one included.
+        awaitCondition { h.kart.lvniBytes.size >= Lvni.PACKET_SIZE }
+
+        // Gone without a word: no FIN, no RST, only the association drops.
+        h.kart.leave()
+
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Recovering(STATION_LEFT) } }
+        val leftBehind = h.kart.connectionsLeftBehind
+        assertEquals(4, leftBehind.size, "the RCD, control, event and video control connections were open")
+        awaitCondition { leftBehind.all { it.state.value == TcpState.CLOSED } }
+        assertNull(h.repo.dhcpServer?.boundClientMac, "the lease was freed for the kart's return")
+
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+    }
+
+    @Test
+    fun aSessionThatReachesDrivingRestartsTheRecoveryBackoff() = runTest {
+        val h = harness()
+        val timeline = ArrayList<Pair<LinkState, ComparableTimeMark>>()
+        backgroundScope.launch { h.repo.linkState.collect { timeline += it to testScheduler.timeSource.markNow() } }
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        // Two losses that are not departures (the kart stays on the network), each followed by a session that
+        // drives again: both recoveries must wait the initial backoff, not a doubled one.
+        repeat(2) {
+            h.kart.dropGameConnections()
+            withTimeout(5_000) { h.repo.linkState.first { it is LinkState.Recovering } }
+            h.kart.runGameSession()
+            awaitDriving(h.repo)
+        }
+
+        // Each pause runs from entering Recovering to beaconing the game network again.
+        val pauses = timeline.indices.filter { timeline[it].first is LinkState.Recovering }.map { start ->
+            val resumed = timeline.drop(start + 1).first { it.first == LinkState.Beaconing(KartNetworkKind.GAME) }
+            resumed.second - timeline[start].second
+        }
+        val initial = SessionConfig().recoveryBackoffInitial
+        assertEquals(listOf(initial, initial), pauses, "a session that reached driving restarts the backoff")
+    }
+
+    @Test
+    fun thePairedKartIsSavedOnceEvenWhenLaterSessionsAreLost() = runTest {
+        val radio = FakeKartRadioAp()
+        val store = CountingPairingStore(store())
+        val repo = KartSessionRepository(radio, store, crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        val kart = FakeKart(radio, masterSecret(), backgroundScope, crypto)
+        kart.start()
+
+        repo.startPairing()
+        assertNotNull(withTimeout(5_000) { repo.pairingQr.first { it != null } })
+        kart.runPairingThenGame()
+        awaitDriving(repo)
+        assertEquals(1, store.pairedKartSaves, "the kart identified right after pairing is saved")
+
+        kart.dropGameConnections()
+        withTimeout(5_000) { repo.linkState.first { it is LinkState.Recovering } }
+        kart.runGameSession()
+        awaitDriving(repo)
+        assertEquals(1, store.pairedKartSaves, "a later session does not save the paired kart again")
+    }
+
+    @Test
+    fun aKartThatLeavesBeforeConnectingDoesNotLeaveTheSessionWaitingOnAccept() = runTest {
+        val h = harness()
+        h.repo.start()
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Beaconing(KartNetworkKind.GAME) } }
+
+        // The kart joins but never connects, so the repository waits in accept() on the RCD port.
+        h.radio.setStationAssociated(true)
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.KartAssociated } }
+        delay(1_000)
+        assertEquals(LinkState.KartAssociated, h.repo.linkState.value, "still waiting for the kart to connect")
+
+        h.radio.setStationAssociated(false)
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Recovering(STATION_LEFT) } }
+
+        // A kart that comes back and connects gets a working session.
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+    }
+
+    @Test
+    fun aDepartureSkipsTheRecoveryBackoff() = runTest {
+        val h = harness()
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        h.kart.leave()
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Recovering(STATION_LEFT) } }
+        val lostAt = testScheduler.timeSource.markNow()
+
+        // The kart re-associates and connects right as the loss is raised, as it does on hardware.
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+        val recovery = lostAt.elapsedNow()
+        assertTrue(
+            recovery < SessionConfig().recoveryBackoffInitial,
+            "the new session started without the ${SessionConfig().recoveryBackoffInitial} backoff, it took $recovery",
+        )
+    }
+
+    @Test
+    fun aConnectionAcceptedAsTheKartLeavesIsStillReset() = runTest {
+        val h = harness()
+        h.repo.start()
+
+        // The kart connects to the session RCD port and leaves the moment its connect completes, so the app accepts
+        // that connection in the same instant it loses the session.
+        h.kart.connectToSessionThenLeave()
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Recovering(STATION_LEFT) } }
+
+        val leftBehind = h.kart.connectionsLeftBehind
+        assertEquals(1, leftBehind.size, "the session RCD connection was open")
+        awaitCondition { leftBehind.all { it.state.value == TcpState.CLOSED } }
+
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+    }
+
+    @Test
+    fun aKartThatLeavesBeforeTheGroupInfoIsAwaitedAgainWithTheSameQr() = runTest {
+        val h = harness()
+        val states = ArrayList<LinkState>()
+        backgroundScope.launch { h.repo.linkState.collect { states += it } }
+
+        h.repo.startPairing()
+        val qr = assertNotNull(withTimeout(5_000) { h.repo.pairingQr.first { it != null } })
+        val pairingNetwork = assertNotNull(h.radio.lastPairingNetwork)
+
+        // The kart connects to the pairing RCD server, takes the lease, then leaves before the handshake.
+        h.kart.connectToPairing()
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.KartLeased } }
+        h.kart.requestLease()
+        awaitCondition { h.repo.dhcpServer?.boundClientMac != null }
+        h.kart.leave()
+
+        // Only the attempt ended: its connection was reset, its lease freed, and the same network and QR wait on.
+        val leftBehind = h.kart.connectionsLeftBehind
+        assertEquals(1, leftBehind.size, "the pairing RCD connection was open")
+        awaitCondition { leftBehind.all { it.state.value == TcpState.CLOSED } }
+        awaitCondition { h.repo.linkState.value == LinkState.Beaconing(KartNetworkKind.PAIRING) }
+        assertNull(h.repo.dhcpServer?.boundClientMac, "the lease was freed for the kart's return")
+        assertContentEquals(qr, h.repo.pairingQr.value, "the same QR stays published")
+        assertEquals(listOf(KartNetworkKind.PAIRING), h.radio.beaconCalls, "the pairing network was not beaconed again")
+        assertEquals(pairingNetwork, h.radio.lastPairingNetwork)
+
+        // The kart comes back and pairs, and the session follows.
+        h.kart.runPairingThenGame()
+        awaitDriving(h.repo)
+        assertNotNull(h.kart.groupInfo, "the kart was handed the game credentials")
+        assertNotNull(h.store.getPairedKart(), "the paired kart is persisted")
+        assertEquals(null, h.repo.pairingQr.value, "the QR is cleared once pairing is done")
+        assertSubsequence(
+            states,
+            listOf(
+                LinkState.Beaconing(KartNetworkKind.PAIRING),
+                LinkState.KartLeased,
+                LinkState.Beaconing(KartNetworkKind.PAIRING),
+                LinkState.KartHandshaked,
+                LinkState.Beaconing(KartNetworkKind.GAME),
+                LinkState.Driving,
+            ),
+        )
+        assertTrue(states.none { it is LinkState.Recovering || it is LinkState.Failed }, "pairing never failed: $states")
+    }
+
+    @Test
+    fun aKartThatLeavesOnceTheGroupInfoCallIsUnderWayCompletesThePairing() = runTest {
+        val h = harness()
+        val states = ArrayList<LinkState>()
+        backgroundScope.launch { h.repo.linkState.collect { states += it } }
+
+        h.repo.startPairing()
+        assertNotNull(withTimeout(5_000) { h.repo.pairingQr.first { it != null } })
+
+        // The kart answers SetGroupInfo and drops off the network right after, then resets its pairing RCD
+        // connection: the app sees both while its call still waits for the answer to come in.
+        var stateAtDeparture: LinkState? = null
+        var qrAtDeparture: ByteArray? = null
+        h.kart.runPairingThenGame(
+            onLeftPairing = {
+                stateAtDeparture = h.repo.linkState.value
+                qrAtDeparture = h.repo.pairingQr.value
+            },
+        )
+        awaitDriving(h.repo)
+
+        assertEquals(LinkState.KartHandshaked, stateAtDeparture, "the kart left while the app was in its SetGroupInfo call")
+        assertNotNull(qrAtDeparture, "the pairing attempt had not finished when the kart left")
+        assertNotNull(h.kart.groupInfo, "the kart was handed the game credentials")
+        assertNotNull(h.store.getPairedKart(), "the paired kart is persisted")
+        assertEquals(1, states.count { it == LinkState.Beaconing(KartNetworkKind.PAIRING) }, "pairing was not retried: $states")
+        assertTrue(states.none { it is LinkState.Recovering || it is LinkState.Failed }, "the departure was not a loss: $states")
+    }
+
+    @Test
+    fun anRcdChannelClosingBeforeTheGroupInfoRetriesTheAttemptWithTheSameQr() = runTest {
+        val h = harness()
+        val states = ArrayList<LinkState>()
+        backgroundScope.launch { h.repo.linkState.collect { states += it } }
+
+        h.repo.startPairing()
+        val qr = assertNotNull(withTimeout(5_000) { h.repo.pairingQr.first { it != null } })
+
+        // The kart's RCD client gives up and resets its connection before the handshake, but the kart stays on the
+        // network: the app's RCD control channel closes without any departure.
+        h.kart.connectToPairing()
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.KartLeased } }
+        h.kart.dropPairingConnection()
+
+        awaitCondition { states.count { it == LinkState.Beaconing(KartNetworkKind.PAIRING) } >= 2 }
+        assertTrue(h.radio.associatedStation.value, "the kart never left the network")
+        assertContentEquals(qr, h.repo.pairingQr.value, "the same QR stays published")
+        assertEquals(listOf(KartNetworkKind.PAIRING), h.radio.beaconCalls, "the pairing network was not beaconed again")
+
+        // The kart starts over on the same network and pairs, and the session follows.
+        h.kart.runPairingThenGame()
+        awaitDriving(h.repo)
+        assertNotNull(h.kart.groupInfo, "the kart was handed the game credentials")
+        assertNotNull(h.store.getPairedKart(), "the paired kart is persisted")
+        assertTrue(states.none { it is LinkState.Recovering || it is LinkState.Failed }, "pairing never failed: $states")
+    }
+
+    @Test
+    fun aDepartureAlreadyPublishedWhenTheWatcherIsDisarmedRetriesInsteadOfSendingTheGroupInfo() = runTest {
+        // The repository's watchers learn of a departure only a while after the access point publishes it, so the
+        // departure below is published but not yet seen by the watcher when the attempt disarms it.
+        val h = harness(radioSeenByRepo = { LateDepartureRadio(it, lag = DEPARTURE_LAG) })
+        val states = ArrayList<LinkState>()
+        backgroundScope.launch { h.repo.linkState.collect { states += it } }
+
+        h.repo.startPairing()
+        val qr = assertNotNull(withTimeout(5_000) { h.repo.pairingQr.first { it != null } })
+
+        // The kart completes the handshake and leaves at once; the app still connects to its pairing service.
+        h.kart.handshakeOnPairingThenLeave()
+        awaitCondition { states.count { it == LinkState.Beaconing(KartNetworkKind.PAIRING) } >= 2 }
+        assertTrue(LinkState.KartHandshaked in states, "the attempt got as far as the handshake: $states")
+        assertNull(h.kart.groupInfo, "no SetGroupInfo was sent to a kart that had left")
+        assertContentEquals(qr, h.repo.pairingQr.value, "the same QR stays published")
+
+        // The kart comes back and pairs, and the session follows.
+        h.kart.runPairingThenGame()
+        awaitDriving(h.repo)
+        assertNotNull(h.kart.groupInfo, "the kart was handed the game credentials")
+        assertTrue(states.none { it is LinkState.Recovering || it is LinkState.Failed }, "pairing never failed: $states")
+    }
+
     // ---- FIX C1: no stale command replay after recovery ---------------------------------------
 
     @Test
@@ -495,3 +772,43 @@ private fun videoStartDatagram(h264: ByteArray): ByteArray {
         h264 +
         ByteArray(LspVideo.PACKET_TRAILER) { 0xEE.toByte() }
 }
+
+/**
+ * The fake radio as the repository sees it, with departures reaching its watchers late: [associatedStation] reports
+ * the current value at once, but a collector receives a `false` only [lag] after it was published.
+ *
+ * Business logic: on hardware a departure is published in [KartRadioAp.associatedStation] and the repository's
+ * watcher sees it one dispatch later. Stretching that dispatch to [lag] of virtual time makes "a departure already
+ * published whose watcher has not run yet" a deterministic state for a test. Everything else is the fake's.
+ */
+@OptIn(ExperimentalForInheritanceCoroutinesApi::class)
+private class LateDepartureRadio(private val radio: FakeKartRadioAp, private val lag: Duration) : KartRadioAp by radio {
+    override val associatedStation: StateFlow<Boolean> = object : StateFlow<Boolean> {
+        override val value: Boolean get() = radio.associatedStation.value
+
+        override val replayCache: List<Boolean> get() = listOf(value)
+
+        override suspend fun collect(collector: FlowCollector<Boolean>): Nothing =
+            radio.associatedStation.collect { associated ->
+                if (!associated) delay(lag)
+                collector.emit(associated)
+            }
+    }
+}
+
+/** An in-memory store that counts how often the paired kart is saved; everything else is the wrapped store's. */
+private class CountingPairingStore(private val inner: InMemoryPairingStore) : PairingStore by inner {
+    var pairedKartSaves = 0
+        private set
+
+    override suspend fun setPairedKart(kart: PairedKart?) {
+        pairedKartSaves++
+        inner.setPairedKart(kart)
+    }
+}
+
+/** The reason [LinkState.Recovering] carries when the kart left the network. */
+private const val STATION_LEFT = "the kart left the network"
+
+/** How late [LateDepartureRadio] lets the repository's watchers see a departure; shorter than the kart's connect retries. */
+private val DEPARTURE_LAG = 500.milliseconds

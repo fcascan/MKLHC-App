@@ -19,6 +19,10 @@ import kotlinx.coroutines.flow.asStateFlow
  * - [start], [stop] and [beacon] are recorded ([startCount], [stopCount], [beaconCalls],
  *   [currentBeacon], [isStarted]); [startFailure] and [beaconFailure] make them throw, standing in for
  *   a radio that cannot come up. [beacon] before [start] is a programming error, as in the real layer.
+ * - As in the real access point, [beacon] switching to another network (another kind, or another pairing
+ *   network) drops the associated station, since the new network starts with an empty station table, while
+ *   asking again for the network already served changes nothing. [beaconedNetwork] lets a simulated kart
+ *   wait for the network it is about to join, as a real kart can only associate with a network on the air.
  * - [frameLink] is the access-point end of an [InMemoryFrameLink] pair and [stationLink] the other end,
  *   so a simulated kart (a fake station) can sit on [stationLink] and talk to the network stack
  *   running on [frameLink]. [sentByAp] and [sentByStation] expose what each side transmitted.
@@ -39,7 +43,11 @@ class FakeKartRadioAp(
     private val links = InMemoryFrameLink.pair()
     private val adapterStateFlow = MutableStateFlow(initialAdapterState)
     private val associatedFlow = MutableStateFlow(false)
+    private val beaconFlow = MutableStateFlow<KartNetworkKind?>(null)
     private val beacons = ArrayList<KartNetworkKind>()
+
+    // The pairing network served now, so a PAIRING beacon for another pairing network counts as a switch.
+    private var servedPairing: PairingNetwork? = null
 
     /** The access-point end of the link; the network stack under test runs on it. */
     override val frameLink: FrameLink = links.first
@@ -81,8 +89,10 @@ class FakeKartRadioAp(
     val beaconCalls: List<KartNetworkKind> get() = beacons.toList()
 
     /** The network being advertised now, or null when not beaconing. */
-    var currentBeacon: KartNetworkKind? = null
-        private set
+    val currentBeacon: KartNetworkKind? get() = beaconFlow.value
+
+    /** [currentBeacon] as a flow, so a simulated kart can wait for the network it is about to join. */
+    val beaconedNetwork: StateFlow<KartNetworkKind?> = beaconFlow.asStateFlow()
 
     /** The pairing network the last PAIRING [beacon] carried, or null when none has been requested. */
     var lastPairingNetwork: PairingNetwork? = null
@@ -120,7 +130,8 @@ class FakeKartRadioAp(
     override suspend fun stop() {
         stopCount++
         isStarted = false
-        currentBeacon = null
+        beaconFlow.value = null
+        servedPairing = null
         associatedFlow.value = false
     }
 
@@ -132,7 +143,12 @@ class FakeKartRadioAp(
         beaconAttemptCount++
         beaconFailure?.let { throw it }
         beacons += network
-        currentBeacon = network
         if (pairing != null) lastPairingNetwork = pairing
+        if (network == beaconFlow.value && pairing == servedPairing) return
+        // Another network starts with an empty station table: the station is dropped before the new network is
+        // announced, so a kart waiting for it associates only after the drop.
+        associatedFlow.value = false
+        servedPairing = pairing
+        beaconFlow.value = network
     }
 }

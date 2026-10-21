@@ -190,3 +190,33 @@ The spike now writes the same code as `spike-<date>-<time>-qr.svg` next to the p
 - app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikePairing.kt
 - app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeSession.kt
 - docs/HARDWARE_SETUP.md
+
+## A kart that leaves mid-session wedged recovery: departure watch, restarted-peer SYN, TCP port leak
+
+- id: a-kart-that-leaves-mid-session-wedged-recovery-departure-wat-20261021-003808
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: session
+- date: 2026-10-21
+
+### Problem
+With the real access point (commit d0494af), a kart that drops off the network mid-session was only noticed when TCP gave up (RTO about 6 s, keepalive about 14 s), or never while the orchestrator sat in `accept()` or a handshake await. Meanwhile the TCP endpoint kept one connection per local port and silently dropped a fresh SYN from the same peer address on a new source port, so a kart that reset without FIN/RST could not reconnect to 5201/5202 until the stale connection died, and might reset again. Code review also found: abort/close of a connection created by `open()` but never connected left its local port in the endpoint table forever (every later `open()` on that port threw "already in use", wedging recovery); `TcpListener.close()` left queued and half-open connections as orphans; and `runGameSession` never returns normally, so the recovery loop's `persistPaired = false` and backoff reset were dead code (the paired kart was saved again on every session and the backoff stuck at its cap).
+
+### Fix (applied, tests green, not yet verified on hardware)
+- KartSessionRepository: a per-session `watchDeparture()` signals the session lost when `associatedStation` turns false; `Session.untilLost(step)` ends every blocking setup step (accept, handshake, connects, RCD calls) as soon as the session is lost; a departure in a game session skips the backoff (waiting for association already paces the loop). Pairing: any loss before the SetGroupInfo call ends only that attempt (same pairing network and QR, Beaconing(PAIRING) again); the watcher is disarmed right before SetGroupInfo, with a check of `associatedStation.value` to close the gap, because after that call the kart leaving is its expected reset onto the game network. `runGameSession` reports `onPairedKartSaved` and `onDriving` so the paired kart is saved once and a session that reached driving restarts the backoff.
+- TcpEndpoint/TcpConnection/TcpListener: a fresh SYN on a listening port from the same peer address but another source port replaces the stale connection (ended as by a received RST, RST to the old port, new passive connection); segments on the replaced four-tuple get a RST; abort/close of a never-connected connection frees its port; a terminated connection ignores queued events and sends nothing; the listener resets connections nobody accepted on close, `accept()` skips dead ones and a cancelled accept does not leak one; the endpoint table is updated by connection identity.
+- Departure detection only sees what the access point reports (deauth/disassoc, or re-authentication after a silent power cycle). A kart that powers off or leaves range without a frame stays associated until TCP notices: TODO(access point) station inactivity timeout.
+
+### Files
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/FakeKartRadioAp.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpEndpoint.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpListener.kt
+
+### Files
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpEndpoint.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpListener.kt

@@ -18,7 +18,8 @@ import kotlin.test.assertTrue
 /**
  * [FakeKartRadioAp]: the controllable stand-in for the radio + access-point layer. These tests pin the
  * behaviour the session-repository tests will rely on: scripted adapter and association state, recorded
- * lifecycle and beacon calls, injectable failures, and a frame link with a station on the other end.
+ * lifecycle and beacon calls, the station dropped when the beacon switches networks, injectable failures,
+ * and a frame link with a station on the other end.
  */
 class FakeKartRadioApTest {
 
@@ -109,6 +110,61 @@ class FakeKartRadioApTest {
         radio.beacon(KartNetworkKind.GAME)
         assertEquals(KartNetworkKind.GAME, radio.currentBeacon)
         assertEquals(listOf(KartNetworkKind.PAIRING, KartNetworkKind.GAME), radio.beaconCalls)
+    }
+
+    @Test
+    fun beaconingAnotherNetworkDropsTheStation() = runTest {
+        val radio = FakeKartRadioAp()
+        radio.start()
+        radio.beacon(KartNetworkKind.GAME)
+        radio.setStationAssociated(true)
+
+        val pairing = PairingNetwork(ssid = "mklhc-pair_abc", seed = ByteArray(0x10) { it.toByte() }, channel = 6)
+        radio.beacon(KartNetworkKind.PAIRING, pairing)
+        assertFalse(radio.associatedStation.value, "switching to the pairing network drops the station")
+
+        radio.setStationAssociated(true)
+        radio.beacon(KartNetworkKind.PAIRING, PairingNetwork(ssid = "mklhc-pair_xyz", seed = ByteArray(0x10), channel = 6))
+        assertFalse(radio.associatedStation.value, "another pairing network is another network too")
+
+        radio.setStationAssociated(true)
+        radio.beacon(KartNetworkKind.GAME)
+        assertFalse(radio.associatedStation.value, "switching back to the game network drops the station")
+    }
+
+    @Test
+    fun beaconingTheServedNetworkAgainKeepsTheStation() = runTest {
+        val radio = FakeKartRadioAp()
+        radio.start()
+        radio.beacon(KartNetworkKind.GAME)
+        radio.setStationAssociated(true)
+
+        radio.beacon(KartNetworkKind.GAME)
+        assertTrue(radio.associatedStation.value, "the game network already served is a no-op")
+
+        val pairing = PairingNetwork(ssid = "mklhc-pair_abc", seed = ByteArray(0x10) { it.toByte() }, channel = 6)
+        radio.beacon(KartNetworkKind.PAIRING, pairing)
+        radio.setStationAssociated(true)
+        radio.beacon(KartNetworkKind.PAIRING, pairing.copy(seed = pairing.seed.copyOf()))
+        assertTrue(radio.associatedStation.value, "the same pairing network, compared by content, is a no-op")
+        assertEquals(
+            listOf(KartNetworkKind.GAME, KartNetworkKind.GAME, KartNetworkKind.PAIRING, KartNetworkKind.PAIRING),
+            radio.beaconCalls,
+            "every call is still recorded",
+        )
+    }
+
+    @Test
+    fun theBeaconedNetworkFollowsTheBeaconAndStop() = runTest {
+        val radio = FakeKartRadioAp()
+        radio.start()
+        radio.beaconedNetwork.test {
+            assertNull(awaitItem())
+            radio.beacon(KartNetworkKind.GAME)
+            assertEquals(KartNetworkKind.GAME, awaitItem())
+            radio.stop()
+            assertNull(awaitItem())
+        }
     }
 
     @Test

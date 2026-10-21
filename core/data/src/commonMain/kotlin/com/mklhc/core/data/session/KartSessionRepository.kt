@@ -33,6 +33,7 @@ import com.mklhc.core.kart_protocol.telemetry.TelemetryDecoder
 import com.mklhc.core.kart_protocol.video.LspVideoReassembler
 import com.mklhc.core.kart_protocol.video.Lvni
 import com.mklhc.core.netstack.AddressPlan
+import com.mklhc.core.netstack.DhcpServer
 import com.mklhc.core.netstack.NetstackConfig
 import com.mklhc.core.netstack.NetstackNode
 import com.mklhc.core.netstack.UdpEndpoint
@@ -47,6 +48,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -84,7 +86,8 @@ import kotlin.time.TimeSource
  *
  * ```
  * adapter -> radio up -> netstack on the link -> beacon GAME
- *   -> kart associates -> kart connects to RCD 5202 -> handshake completes
+ *   -> kart associates (from here on, the kart leaving the network loses the session)
+ *   -> kart connects to RCD 5202 -> handshake completes
  *   -> app connects to the kart's control (5103) and event (5107) ports
  *   -> identify (system info + product code) -> announce our ports (connection_info)
  *   -> bind telemetry (5116) and video (5016), listen video control (5032, LVNI keepalive)
@@ -94,6 +97,24 @@ import kotlin.time.TimeSource
  * Pairing runs the same way but first beacons the pairing network, serves the handshake with pairing on,
  * hands the kart the game-network credentials, and then falls into the session sequence; the paired kart
  * is remembered once it is identified on the game network.
+ *
+ * Departure: the kart can drop off the access point at any time (power cycled, reset after a failed step, out
+ * of range), usually without closing its connections, so TCP would notice only seconds later, or never while the
+ * sequence waits in an accept or a handshake. Once the kart is associated, a watcher per session turns a departure
+ * the access point reports into a session loss at once, and every setup step that can block (the accept, the
+ * handshake, the connects, the RCD calls) ends as soon as the session is lost. The access point reports what it
+ * sees on the air: the kart's deauthentication or disassociation, or the kart authenticating again after a silent
+ * power cycle. A kart that powers off or leaves range without sending a frame stays associated, and is noticed only
+ * when TCP gives up on its connections (retransmission timeout or keepalive), which closes the RCD control channel
+ * and loses the session the usual way; see the `TODO(access point)` on [Session.watchDeparture]. The loss then takes
+ * the usual path: [LinkState.Recovering], teardown, the lease freed, and the kart awaited again, after a departure
+ * without the recovery backoff (waiting for the kart to associate again already paces the loop).
+ *
+ * While pairing, any session loss before the SetGroupInfo call starts (a departure, the RCD control channel closing,
+ * or the stale RCD connection reset by the kart's reconnect) ends only that attempt: it is torn down and the app
+ * waits for the kart again on the same pairing network, with the same QR. Any other failure ends the pairing, and
+ * [cancelPairing] / [stop] are the way out of a kart that keeps failing. Once the SetGroupInfo call is under way,
+ * the kart leaving is its expected reset onto the game network, not a loss.
  *
  * Safety is woven through: a deadman repeats the last drive command for at most [SessionConfig.deadmanTimeout]
  * and otherwise sends neutral, any loss of the RCD control channel drives [LinkState.Recovering] with the
@@ -203,6 +224,12 @@ class KartSessionRepository(
 
     @Volatile
     private var orchestratorJob: Job? = null
+
+    /**
+     * The running network stack's DHCP server, or null while no stack runs. Only this module's tests read it, to
+     * check that the kart's lease is freed when a session or a pairing attempt ends.
+     */
+    internal val dhcpServer: DhcpServer? get() = node?.dhcpServer
 
     /**
      * Begins the normal session flow: ensure the adapter, start the radio, run the network stack, beacon
@@ -360,15 +387,29 @@ class KartSessionRepository(
                 try {
                     radioAp.beacon(KartNetworkKind.GAME)
                     setState(LinkState.Beaconing(KartNetworkKind.GAME))
-                    runGameSession(localNode, identity, persistPaired)
-                    persistPaired = false
-                    backoff = config.recoveryBackoffInitial
+                    // A session only ever ends by a loss, so its progress is reported as it happens: once the paired
+                    // kart is saved it is not saved again, and a session that reached driving restarts the backoff.
+                    runGameSession(
+                        node = localNode,
+                        identity = identity,
+                        persistPaired = persistPaired,
+                        onPairedKartSaved = { persistPaired = false },
+                        onDriving = { backoff = config.recoveryBackoffInitial },
+                    )
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (lost: SessionLostException) {
-                    log.w { "orchestrate(): session lost, recovering -> reason=${lost.message} backoff=$backoff" }
-                    setState(LinkState.Recovering(lost.message ?: "link lost"))
-                    backoff = backOff(backoff)
+                    if (lost.departure) {
+                        // No backoff after a departure: waiting for the kart to associate again already paces the
+                        // loop, and on hardware the kart's re-association and first SYN arrive right as the loss is
+                        // raised, so a backoff would only keep its connect waiting.
+                        log.w { "orchestrate(): the kart left, waiting for it again -> reason=${lost.message}" }
+                        setState(LinkState.Recovering(lost.message ?: "link lost"))
+                    } else {
+                        log.w { "orchestrate(): session lost, recovering -> reason=${lost.message} backoff=$backoff" }
+                        setState(LinkState.Recovering(lost.message ?: "link lost"))
+                        backoff = backOff(backoff)
+                    }
                 } catch (failure: Exception) {
                     log.e(failure) { "orchestrate(): session failed, recovering -> message=${failure.message} backoff=$backoff" }
                     setState(LinkState.Recovering(failure.message ?: "session error"))
@@ -401,63 +442,139 @@ class KartSessionRepository(
             .first { it == AdapterState.READY }
     }
 
+    /**
+     * Publishes a fresh pairing QR, beacons the network it describes and runs pairing attempts on it until one hands
+     * the kart the game-network credentials.
+     *
+     * Business logic: an attempt ends without the credentials when its session is lost before the SetGroupInfo call
+     * starts (see [runPairingAttempt]). That ends only the attempt: its connections, its listener and the kart's lease
+     * go, and the next attempt waits for the kart on the same network, with the QR still published and the link back
+     * at [LinkState.Beaconing]. There is no attempt limit; [cancelPairing] and [stop] end the loop. Any other failure
+     * propagates and ends the pairing.
+     */
     private suspend fun runPairingSequence(node: NetstackNode, identity: KartIdentity) {
         val seed = crypto.secureRandomBytes(PAIRING_SEED_SIZE)
         val pairingSsid = pairingSsid()
         val channel = pairingStore.getChannel()
         _pairingQr.value = encodePairingPayload(seed, pairingSsid, channel)
-        // The beacon carries the SAME ssid / seed / channel the QR advertises, so the access point stands up
-        // exactly the network the kart is about to scan for; it derives the pairing PSK from the seed itself.
-        radioAp.beacon(KartNetworkKind.PAIRING, PairingNetwork(pairingSsid, seed, channel))
-        setState(LinkState.Beaconing(KartNetworkKind.PAIRING))
-
-        val session = Session()
-        currentSession = session
         try {
-            radioAp.associatedStation.first { it }
-            setState(LinkState.KartAssociated)
-
-            val listener = node.tcp.listen(config.pairingRcdPort)
-            session.register { listener.close() }
-            val serverConn = listener.accept()
-            session.register { runCatching { serverConn.abort() } }
-            setState(LinkState.KartLeased)
-
-            serveHandshakeAwaitConnect(session, serverConn, identity, pairing = true)
-            setState(LinkState.KartHandshaked)
-
-            // One connect window opens here at handshake finalize and is shared by every connect that follows.
-            val connectStart = timeSource.markNow()
-            val pairConn = node.tcp.open(config.pairingLocalPort, AddressPlan.KART_LEASE, FujiPorts.PAIRING)
-            session.register { runCatching { pairConn.abort() } }
-            connectWithin(pairConn, connectStart)
-            val pairingClient = FujiPairingClient(RcdClient(pairConn.asRcdTransport()))
-            pairingClient.setGroupInfo(identity.gameSsid, identity.gamePsk)
-            log.i { "runPairingSequence(): group info sent, the kart will reset onto the game network" }
+            // The beacon carries the SAME ssid / seed / channel the QR advertises, so the access point stands up
+            // exactly the network the kart is about to scan for; it derives the pairing PSK from the seed itself.
+            radioAp.beacon(KartNetworkKind.PAIRING, PairingNetwork(pairingSsid, seed, channel))
+            var attempt = 1
+            while (true) {
+                setState(LinkState.Beaconing(KartNetworkKind.PAIRING))
+                val session = Session()
+                currentSession = session
+                val lostReason = try {
+                    runPairingAttempt(node, identity, session)
+                } finally {
+                    // The station disassociates as it resets onto the game network, or it left part-way: either way
+                    // free its lease for the next association, and tear the attempt down.
+                    node.dhcpServer.reset()
+                    session.teardown()
+                }
+                if (lostReason == null) return
+                log.w { "runPairingSequence(): the attempt ended before the group info was sent, waiting for the kart again -> attempt=$attempt reason=$lostReason" }
+                attempt++
+            }
         } finally {
             currentSession = null
             _pairingQr.value = null
             resetDriveCommand()
-            // The station disassociates as it resets onto the game network; free its lease for the next one.
-            node.dhcpServer.reset()
-            session.teardown()
         }
     }
 
-    private suspend fun runGameSession(node: NetstackNode, identity: KartIdentity, persistPaired: Boolean) {
+    /**
+     * Runs one pairing attempt on [session]: waits for the kart to associate with the pairing network, serves the
+     * pairing handshake, connects to the kart's pairing service and hands it the game-network credentials.
+     *
+     * Business logic: until the SetGroupInfo call starts, any loss of the session ends the attempt, not the pairing:
+     * the kart leaving the network (it resets after a failed step, or is power cycled), the RCD control channel
+     * closing, or the stale RCD connection reset by the kart's reconnect. The departure watcher is armed once the
+     * kart is associated, every blocking step ends as soon as the session is lost, and the attempt then returns the
+     * reason so the caller tears it down and waits for the kart again. A failure while the session still stands (a
+     * connect that times out or is refused, a programming error) propagates and ends the pairing, as before.
+     *
+     * The watcher is disarmed before the SetGroupInfo call: from then on the kart leaving is its expected reset onto
+     * the game network, and the call's own outcome decides. A departure published just before the disarm whose watcher
+     * had not run yet is cancelled with it, so the association is checked once more after the disarm.
+     *
+     * @return null once the credentials were handed over, or the reason the session was lost before the call.
+     */
+    private suspend fun runPairingAttempt(node: NetstackNode, identity: KartIdentity, session: Session): String? {
+        radioAp.associatedStation.first { it }
+        val departureWatch = session.watchDeparture()
+        setState(LinkState.KartAssociated)
+
+        val pairConn = try {
+            val listener = node.tcp.listen(config.pairingRcdPort)
+            session.register { listener.close() }
+            val serverConn = session.untilLost {
+                listener.accept().also { accepted -> session.register { runCatching { accepted.abort() } } }
+            }
+            setState(LinkState.KartLeased)
+
+            session.untilLost { serveHandshakeAwaitConnect(session, serverConn, identity, pairing = true) }
+            setState(LinkState.KartHandshaked)
+
+            // One connect window opens here at handshake finalize and is shared by every connect that follows.
+            val connectStart = timeSource.markNow()
+            val connection = node.tcp.open(config.pairingLocalPort, AddressPlan.KART_LEASE, FujiPorts.PAIRING)
+            session.register { runCatching { connection.abort() } }
+            session.untilLost { connectWithin(connection, connectStart) }
+            connection
+        } catch (failure: Exception) {
+            // CancellationException is an IllegalStateException: cancelPairing / stop always end the pairing.
+            val programmingError = failure is IllegalArgumentException || failure is IllegalStateException
+            if (programmingError || !session.lost.isCompleted) throw failure
+            return session.lost.await()
+        }
+
+        // Disarmed before the call, with nothing in between: a loss seen until now ends the attempt, a departure from
+        // here on is the kart resetting onto the game network with the credentials.
+        departureWatch.cancel()
+        if (session.lost.isCompleted) return session.lost.await()
+        if (!radioAp.associatedStation.value) {
+            log.w { "runPairingAttempt(): the kart left just before the group info call -> associated=false" }
+            return STATION_LEFT_REASON
+        }
+        val pairingClient = FujiPairingClient(RcdClient(pairConn.asRcdTransport()))
+        pairingClient.setGroupInfo(identity.gameSsid, identity.gamePsk)
+        log.i { "runPairingAttempt(): group info sent, the kart will reset onto the game network" }
+        return null
+    }
+
+    /**
+     * Runs one game session until it is lost; it never returns normally, it ends with a [SessionLostException].
+     *
+     * @param persistPaired whether the kart identified in this session is the one just paired and must be saved.
+     * @param onPairedKartSaved called once the paired kart has been saved, so later sessions do not save it again.
+     * @param onDriving called when the session reaches [LinkState.Driving], so the caller can restart its backoff.
+     */
+    private suspend fun runGameSession(
+        node: NetstackNode,
+        identity: KartIdentity,
+        persistPaired: Boolean,
+        onPairedKartSaved: () -> Unit,
+        onDriving: () -> Unit,
+    ) {
         val session = Session()
         currentSession = session
         try {
             radioAp.associatedStation.first { it }
+            // From here until the session ends, the kart leaving the network is a session loss.
+            session.watchDeparture()
             setState(LinkState.KartAssociated)
 
             val listener = node.tcp.listen(config.sessionRcdPort)
             session.register { listener.close() }
-            val serverConn = listener.accept()
-            session.register { runCatching { serverConn.abort() } }
+            val serverConn = session.untilLost {
+                listener.accept().also { accepted -> session.register { runCatching { accepted.abort() } } }
+            }
             setState(LinkState.KartLeased)
 
-            val device = serveHandshakeAwaitConnect(session, serverConn, identity, pairing = false)
+            val device = session.untilLost { serveHandshakeAwaitConnect(session, serverConn, identity, pairing = false) }
             setState(LinkState.KartHandshaked)
 
             // Within the connect window the app turns into the client of the kart's own services. One window
@@ -466,31 +583,34 @@ class KartSessionRepository(
             val connectStart = timeSource.markNow()
             val controlConn = node.tcp.open(config.controlLocalPort, AddressPlan.KART_LEASE, FujiPorts.CONTROL)
             session.register { runCatching { controlConn.abort() } }
-            connectWithin(controlConn, connectStart)
+            session.untilLost { connectWithin(controlConn, connectStart) }
             val control = FujiControlClient(RcdClient(controlConn.asRcdTransport()))
             currentControl = control
 
             val eventConn = node.tcp.open(config.eventLocalPort, AddressPlan.KART_LEASE, FujiPorts.EVENT)
             session.register { runCatching { eventConn.abort() } }
-            connectWithin(eventConn, connectStart)
+            session.untilLost { connectWithin(eventConn, connectStart) }
             val eventChannel = FujiEventChannel(eventConn.asRcdTransport())
             session.launch { runGuarded("event channel") { eventChannel.run() } }
 
-            val systemInfo = control.getSystemInfo()
-            val productCode = control.getProductCode()
+            val systemInfo = session.untilLost { control.getSystemInfo() }
+            val productCode = session.untilLost { control.getProductCode() }
             _kartInfo.value = kartInfoOf(productCode, systemInfo)
             if (persistPaired) {
                 val paired = PairedKart(productCode.serial, device.ident)
                 pairingStore.setPairedKart(paired)
+                onPairedKartSaved()
                 log.i { "runGameSession(): remembered the paired kart -> serial=${paired.serial}" }
             }
 
-            control.setConnectionInfo(
-                telemetryPort = config.telemetryPort,
-                videoControlPort = config.videoControlPort,
-                videoStreamPort = config.videoStreamPort,
-                timestamp = clock(),
-            )
+            session.untilLost {
+                control.setConnectionInfo(
+                    telemetryPort = config.telemetryPort,
+                    videoControlPort = config.videoControlPort,
+                    videoStreamPort = config.videoStreamPort,
+                    timestamp = clock(),
+                )
+            }
 
             val telemetryUdp = node.bindUdp(config.telemetryPort)
             session.register { telemetryUdp.close() }
@@ -512,7 +632,7 @@ class KartSessionRepository(
             currentSettings = pairingStore.getSettings()
             session.launch { pairingStore.observeSettings().collect { currentSettings = it } }
 
-            control.setState(FujiControlClient.STATE_DRIVE)
+            session.untilLost { control.setState(FujiControlClient.STATE_DRIVE) }
             setState(LinkState.KartReady)
 
             // Safety: clear any command left over from a previous (pre-loss) session so the deadman path and
@@ -520,9 +640,9 @@ class KartSessionRepository(
             resetDriveCommand()
             session.launch { teleopLoop(teleopUdp) }
             setState(LinkState.Driving)
+            onDriving()
 
-            val reason = session.lost.await()
-            throw SessionLostException(reason)
+            session.awaitLoss()
         } finally {
             currentControl = null
             currentSession = null
@@ -538,7 +658,8 @@ class KartSessionRepository(
      * Serves the RCD handshake on [serverConn] and suspends until the kart has completed it, returning the
      * connected device. The serve loop keeps running in the session scope; when it ends (the kart closed
      * the control channel) it signals the session lost. If the channel ends before the handshake completes,
-     * the await fails with a [SessionLostException].
+     * the await fails with a [SessionLostException]. Callers run it through [Session.untilLost], so a session
+     * lost otherwise (the kart left the network) ends the wait too.
      */
     private suspend fun serveHandshakeAwaitConnect(
         session: Session,
@@ -722,22 +843,32 @@ class KartSessionRepository(
     @OptIn(ExperimentalEncodingApi::class)
     private fun pairingSsid(): String = PAIRING_SSID_PREFIX + Base64.Default.encode(crypto.secureRandomBytes(SSID_RANDOM_SIZE))
 
-    /** Raised when an established session is lost; the orchestrator turns it into [LinkState.Recovering]. */
-    private class SessionLostException(message: String) : Exception(message)
+    /**
+     * Raised when an established session is lost; the orchestrator turns it into [LinkState.Recovering].
+     *
+     * @param departure true when the loss was the kart leaving the network, which the recovery loop does not back
+     *   off from.
+     */
+    private class SessionLostException(message: String, val departure: Boolean = false) : Exception(message)
 
     /**
      * One session's launched work and sockets, and the single "lost" signal that ends it.
      *
      * Everything a session opens is registered here so [teardown] can cancel the loops, send one last
-     * neutral and close the sockets even when the surrounding scope is being cancelled.
+     * neutral and close the sockets even when the surrounding scope is being cancelled. The sequence runs its
+     * blocking setup steps through [untilLost], and [watchDeparture] makes the kart leaving the network one of
+     * the ways the session is lost.
      */
     private inner class Session {
         private val job = SupervisorJob(repositoryJob)
         private val scope = CoroutineScope(repositoryScope.coroutineContext + job)
         private val closeables = ArrayList<suspend () -> Unit>()
 
-        /** Completes with the reason the moment the session is lost; the sequence awaits it. */
+        /** Completes with the reason the moment the session is lost; [awaitLoss] reports it. */
         val lost = CompletableDeferred<String>()
+
+        // True when the session was lost because the kart left the network (the departure came first).
+        private var stationLeft: Boolean = false
 
         /** The teleop endpoint, so a safety neutral can be sent on teardown. */
         @Volatile
@@ -751,6 +882,54 @@ class KartSessionRepository(
 
         fun signalLost(reason: String) {
             lost.complete(reason)
+        }
+
+        // TODO(access point): a station inactivity timeout in the access point (drop the station once it has sent
+        //  nothing for a few seconds) would report the silent departures too. Today a kart that powers off or leaves
+        //  range without a frame stays associated, and its session ends only when TCP retransmission or keepalive
+        //  gives up on the RCD control channel; a sequence waiting in an accept waits until the kart returns.
+        /**
+         * Arms the departure watcher: from now until the session ends, or until the returned job is cancelled, a
+         * departure the access point reports signals the session lost. The access point reports the station's
+         * deauthentication or disassociation, and the station authenticating again (a kart that power cycled without
+         * a word and rejoins); a station that goes silent without a frame is not reported. Call it once the station
+         * is associated; a station already gone by then is caught at once ([KartRadioAp.associatedStation] replays
+         * its value).
+         */
+        fun watchDeparture(): Job = launch {
+            radioAp.associatedStation.first { associated -> !associated }
+            if (lost.isCompleted) return@launch
+            stationLeft = true
+            log.w { "watchDeparture(): the kart left the network, ending the session -> reason=$STATION_LEFT_REASON" }
+            signalLost(STATION_LEFT_REASON)
+        }
+
+        /** Suspends until the session is lost, then throws the [SessionLostException] that reports the loss. */
+        suspend fun awaitLoss(): Nothing {
+            val reason = lost.await()
+            throw SessionLostException(reason, departure = stationLeft)
+        }
+
+        /**
+         * Runs one setup [step] that can block (an accept, a handshake await, a connect, an RCD call) but ends it
+         * with a [SessionLostException] as soon as the session is lost, so a lost session never leaves the sequence
+         * waiting on something that can no longer complete.
+         *
+         * Business logic: a session already lost never starts the step. Otherwise the step runs in the caller's
+         * coroutine while a watcher child waits in [awaitLoss]; a loss fails the scope with the watcher's
+         * [SessionLostException], which cancels the step. A step that finishes first returns its value (a loss right
+         * after is seen by the next step or the final await), a step that fails first fails with its own exception,
+         * and a cancellation from outside propagates as usual. The step must be cancellable: whatever it runs under
+         * [NonCancellable] delays the loss until it returns. Anything the step creates that the session must clean up
+         * (an accepted connection) is registered inside the step, so it is torn down whichever way the race between
+         * the step and the loss goes.
+         */
+        suspend fun <T> untilLost(step: suspend () -> T): T {
+            if (lost.isCompleted) awaitLoss()
+            return coroutineScope {
+                val watcher = launch { awaitLoss() }
+                step().also { watcher.cancel() }
+            }
         }
 
         /** Sends one neutral drive datagram, if the teleop endpoint is still open, for the deadman path. */
@@ -773,6 +952,9 @@ class KartSessionRepository(
 
         /** The pairing network's SSID prefix; the tail is random, base64-encoded. */
         const val PAIRING_SSID_PREFIX = "mklhc-pair_"
+
+        /** Why a session ends when the kart leaves the access point; shown in [LinkState.Recovering]. */
+        const val STATION_LEFT_REASON = "the kart left the network"
 
         // Design 8.5: the pairing SSID's random tail is 12 octets (base64 to 16 characters after the prefix).
         const val SSID_RANDOM_SIZE = 12
