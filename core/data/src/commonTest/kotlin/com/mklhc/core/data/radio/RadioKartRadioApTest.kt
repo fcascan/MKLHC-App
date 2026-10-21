@@ -1,5 +1,6 @@
 package com.mklhc.core.data.radio
 
+import co.touchlab.kermit.Severity
 import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.data.CapturingLogWriter
 import com.mklhc.core.data.capturingLogger
@@ -23,11 +24,16 @@ import com.mklhc.core.wifi_ap.mac.Ieee80211Frame
 import com.mklhc.core.wifi_ap.mac.InformationElements
 import com.mklhc.core.wifi_ap.mac.MacAddress
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -41,6 +47,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -54,7 +61,15 @@ import kotlin.time.Duration.Companion.seconds
  * recovering session never cuts off an associated kart, while switching networks serves a new configuration and drops
  * the station; and stop shuts the radio down and can always be repeated. The nonce table is deterministic: the
  * pairing network's random draw and the game network's time-based draw land on different indexes, so a network
- * served with the wrong kind of nonce shows up as a wrong key.
+ * served with the wrong kind of nonce shows up as a wrong key. When the platform's connection flag goes false and true
+ * again under a started radio (radiod relaunched), the radio is brought up again and the network that was served is
+ * served again with the same configuration, so the same beacon and the same keys; a disconnect alone, a radio that is
+ * not started, and the connection start() itself waited for change nothing, and a failed or interrupted re-bring-up
+ * leaves nothing running that a stop or the next reconnect cannot deal with. A radiod that goes away during start()'s
+ * own bring-up (a crash in INIT, or the old radiod of a stop shutting down) is not waited on: the radiod that replaces
+ * it gets its own OPEN_DEVICE and INIT and its READY completes start(), while a second disconnect fails start() and
+ * leaves it retryable. The connection is a [MutableStateFlow], and radiod's READY is played by hand, so every step is
+ * observable under virtual time.
  */
 @OptIn(ExperimentalCoroutinesApi::class) // runCurrent / advanceTimeBy drive the access point's collectors under virtual time
 class RadioKartRadioApTest {
@@ -452,6 +467,404 @@ class RadioKartRadioApTest {
         )
     }
 
+    // ---- a relaunched radiod -------------------------------------------------------------------
+
+    @Test
+    fun aReconnectWhileServingPairingBringsTheRadioUpAgainAndServesTheSameNetwork() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        assertEquals(2, rig.radio.sentMessages.size, "a connection that is up when the radio starts is no reconnect")
+        rig.ap.beacon(KartNetworkKind.PAIRING, pairingNetwork())
+        val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
+        rig.associate(rig.station(rig.pairingKey()), PAIRING_SSID)
+        rig.radio.clearSentMessages()
+
+        connection.value = false
+        runCurrent()
+        assertTrue(rig.radio.sentMessages.isEmpty(), "the disconnect alone does nothing")
+        connection.value = true
+        runCurrent()
+
+        assertEquals(
+            listOf<RadioMessage.AppToRadiod>(
+                RadioMessage.OpenDevice(RADIO_OPTIONS.vid, RADIO_OPTIONS.pid),
+                RadioMessage.Init(CHANNEL, RADIO_OPTIONS.bandwidthMhz, RADIO_OPTIONS.txPowerIndex),
+            ),
+            rig.radio.sentMessages,
+            "the new radiod gets the adapter and the channel, and nothing is served before its READY",
+        )
+        assertFalse(rig.ap.associatedStation.value, "bringing the radio up drops the station: the orchestrator sees a departure")
+
+        rig.radiodReady()
+
+        assertEquals(listOf("OpenDevice", "Init", "SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertContentEquals(BSSID_BYTES, rig.radio.sentOfType<RadioMessage.SetIdentity>().single().mac)
+        val restarted = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
+        assertEquals(firstStart.intervalTu, restarted.intervalTu)
+        assertContentEquals(firstStart.beacon, restarted.beacon, "the same configuration is served again, not a rebuilt one")
+
+        // The kart rejoins with the key it already holds, and the pairing network still counts as the one served.
+        val kart = rig.station(rig.pairingKey())
+        rig.associate(kart, PAIRING_SSID)
+        assertTrue(rig.discoverGetsThrough(kart, pn = 1))
+        rig.radio.clearSentMessages()
+        rig.ap.beacon(KartNetworkKind.PAIRING, pairingNetwork(seed = SEED.copyOf()))
+        assertTrue(rig.radio.sentMessages.isEmpty(), "the same request is still a no-op, so the kart is not cut off again")
+    }
+
+    @Test
+    fun aReconnectWhileServingTheGameNetworkServesItAgainWithTheSameKey() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
+        rig.associate(rig.station(rig.gameKey()), rig.identity.gameSsid)
+        rig.radio.clearSentMessages()
+
+        rig.relaunchRadiod(connection)
+        rig.radiodReady()
+
+        assertEquals(listOf("OpenDevice", "Init", "SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertContentEquals(
+            firstStart.beacon,
+            rig.radio.sentOfType<RadioMessage.StartBeacon>().single().beacon,
+            "a rebuilt game network would carry the next time-based nonce, so another beacon",
+        )
+        assertFalse(rig.ap.associatedStation.value, "nobody is associated until the kart joins again")
+
+        // The key is the first nonce's: a rebuilt configuration would use the next one and reject this kart.
+        val kart = rig.station(rig.gameKey())
+        rig.associate(kart, rig.identity.gameSsid)
+        assertTrue(rig.discoverGetsThrough(kart, pn = 1), "the kart rejoins with the key it already has")
+        rig.radio.clearSentMessages()
+        repeat(REPEATED_REQUESTS) { rig.ap.beacon(KartNetworkKind.GAME) } // the orchestrator's recovery pass
+        assertTrue(rig.radio.sentMessages.isEmpty(), "and the recovery pass finds the game network served")
+        assertTrue(rig.ap.associatedStation.value)
+    }
+
+    @Test
+    fun aReconnectWhileStartedButBeforeAnyBeaconOnlyBringsTheRadioUp() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.radio.clearSentMessages()
+
+        rig.relaunchRadiod(connection)
+        rig.radiodReady()
+
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName }, "there was no network to serve again")
+
+        rig.radio.clearSentMessages()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertEquals(listOf("SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName }, "the radio is usable")
+    }
+
+    @Test
+    fun aReconnectWhileNotStartedDoesNothing() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+
+        rig.relaunchRadiod(connection)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "never started")
+
+        assertNotNull(rig.start(answer = RadioMessage.Error(code = 7u, text = "cannot open the adapter")))
+        rig.radio.clearSentMessages()
+        rig.relaunchRadiod(connection)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "a start that failed leaves nothing to bring up")
+
+        assertNull(rig.start())
+        rig.ap.beacon(KartNetworkKind.GAME)
+        rig.ap.stop()
+        rig.radio.clearSentMessages()
+        rig.relaunchRadiod(connection)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "a stopped radio stays down")
+        assertFalse(rig.logs.allText().contains("redoBringUpAfterReconnect"), rig.logs.allText())
+    }
+
+    @Test
+    fun aDisconnectAloneChangesNothing() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        rig.associate(rig.station(rig.gameKey()), rig.identity.gameSsid)
+        rig.radio.clearSentMessages()
+
+        connection.value = false
+        runCurrent()
+        advanceTimeBy(1.seconds)
+
+        assertTrue(rig.radio.sentMessages.isEmpty(), "the radio is not touched until radiod is back")
+        assertTrue(rig.ap.associatedStation.value, "the station is dropped by the bring-up, not by the disconnect")
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "the game network still counts as served")
+    }
+
+    @Test
+    fun aRadiodRelaunchedDuringStartsBringUpGetsAFreshBringUpWhoseReadyCompletesStart() = runTest {
+        // No awaitRadioConnected: the wait is derived from the connection. start() waits for radiod to connect, and
+        // that false -> true change is the one it waited for, not a reconnect.
+        val connection = MutableStateFlow(false)
+        val rig = Rig(this, radioConnection = connection)
+        val start = rig.launchStart()
+        runCurrent()
+        assertTrue(rig.radio.sentMessages.isEmpty(), "start waits for radiod")
+
+        connection.value = true
+        runCurrent()
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+
+        // radiod crashes during its INIT: no READY will come for these commands, and start() does not wait for one.
+        connection.value = false
+        runCurrent()
+        assertNull(start.outcome, "start waits for radiod to come back")
+        assertEquals(2, rig.radio.sentMessages.size, "nothing is sent to a radiod that is gone")
+        assertTrue(rig.logs.allText().contains("start(): radiod disconnected during the bring-up, waiting for it to reconnect"))
+
+        // The supervisor relaunches it: the new radiod knows nothing of the first commands and gets its own.
+        connection.value = true
+        runCurrent()
+        assertEquals(listOf("OpenDevice", "Init", "OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertNull(start.outcome, "only the new radiod's READY completes start")
+
+        rig.radiodReady()
+        assertTrue(assertNotNull(start.outcome).isSuccess, "${start.outcome}")
+        advanceTimeBy(1.seconds)
+        runCurrent()
+        assertEquals(4, rig.radio.sentMessages.size, "the relaunch start() recovered from is not taken for a later reconnect")
+
+        // The radio is usable, and the watcher is alive from here on: a real reconnect brings the radio up again.
+        rig.radio.clearSentMessages()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertEquals(listOf("SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName })
+        rig.radio.clearSentMessages()
+        rig.relaunchRadiod(connection)
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+    }
+
+    @Test
+    fun aSecondDisconnectDuringStartsBringUpFailsStartAndLeavesItRetryable() = runTest {
+        val connection = MutableStateFlow(true)
+        var waits = 0
+        // An explicit wait is still the one used, before the bring-up and after a disconnect.
+        val rig = Rig(this, awaitRadioConnected = { waits++; connection.first { it } }, radioConnection = connection)
+        val start = rig.launchStart()
+        runCurrent()
+
+        rig.relaunchRadiod(connection) // the first disconnect: start() brings the radio up on the new radiod
+        assertEquals(listOf("OpenDevice", "Init", "OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertNull(start.outcome)
+
+        connection.value = false // and that radiod goes away too
+        runCurrent()
+
+        val failure = assertNotNull(start.outcome).exceptionOrNull()
+        assertTrue(failure is IllegalStateException, "a clear failure, not a cancellation: $failure")
+        assertTrue("radiod disconnected again during the bring-up" in failure.message.orEmpty(), failure.message)
+        assertTrue(
+            rig.logs.allText().contains("start(): the radio did not come up, shutting the access point down again -> message="),
+            rig.logs.allText(),
+        )
+        assertEquals(
+            listOf("OpenDevice", "Init", "OpenDevice", "Init", "StopBeacon", "Shutdown"),
+            rig.radio.sentMessages.map { it::class.simpleName },
+            "the access point is shut down again",
+        )
+        assertEquals(2, waits, "one wait before the first bring-up, one for the radiod that replaced it")
+        assertFailsWith<IllegalStateException>("a failed start leaves the radio not started") { rig.ap.beacon(KartNetworkKind.GAME) }
+
+        connection.value = true
+        runCurrent()
+        assertEquals(6, rig.radio.sentMessages.size, "nothing watches the connection of a radio that did not start")
+        rig.radio.clearSentMessages()
+        assertNull(rig.start(), "the next attempt starts clean")
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+    }
+
+    @Test
+    fun aStartRightAfterAStopComesUpOnTheRadiodThatReplacesTheOneShuttingDown() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        rig.ap.stop()
+        rig.radio.clearSentMessages()
+
+        // The old radiod got SHUTDOWN but is still connected, so start() does not wait and talks to it.
+        val start = rig.launchStart()
+        runCurrent()
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+
+        connection.value = false // it exits; the supervisor relaunches it after its backoff
+        runCurrent()
+        advanceTimeBy(SUPERVISOR_RESTART_BACKOFF)
+        runCurrent()
+        assertNull(start.outcome, "start waits for the new radiod, not for a READY the old one will never send")
+        connection.value = true
+        runCurrent()
+        rig.radiodReady()
+
+        assertTrue(assertNotNull(start.outcome).isSuccess, "${start.outcome}")
+        assertEquals(listOf("OpenDevice", "Init", "OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+        rig.radio.clearSentMessages()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertEquals(
+            listOf("SetIdentity", "StartBeacon"),
+            rig.radio.sentMessages.map { it::class.simpleName },
+            "the new radiod gets its identity and a started beacon",
+        )
+        val kart = rig.station(rig.gameKey(FIRST_GAME_NONCE_INDEX + 1))
+        rig.associate(kart, rig.identity.gameSsid)
+        assertTrue(rig.discoverGetsThrough(kart, pn = 1), "the game network is served from scratch, with the next nonce")
+    }
+
+    @Test
+    fun aCommandRadiodCanNoLongerTakeDuringStartCountsAsTheDisconnect() = runTest {
+        // radiod goes away as OPEN_DEVICE is sent: the send fails before the watcher has seen the flag drop.
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioLink = { fake -> DisconnectingOpenRadioLink(fake, connection) }, radioConnection = connection)
+        val start = rig.launchStart()
+        runCurrent()
+
+        assertNull(start.outcome, "a send that fails because radiod is gone is waited out like the disconnect it is")
+        assertTrue(rig.radio.sentMessages.isEmpty())
+        connection.value = true
+        runCurrent()
+        rig.radiodReady()
+
+        assertTrue(assertNotNull(start.outcome).isSuccess, "${start.outcome}")
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+    }
+
+    @Test
+    fun cancellingStartWhileItWaitsForRadiodToComeBackShutsTheAccessPointDown() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        val start = launch { rig.ap.start() }
+        runCurrent()
+        connection.value = false
+        runCurrent()
+
+        start.cancel()
+        runCurrent()
+
+        assertTrue(start.isCancelled, "cancellation propagates out of start()")
+        assertEquals(listOf("OpenDevice", "Init", "StopBeacon", "Shutdown"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertFalse(rig.logs.allText().contains("did not come up"), "a cancellation is not reported as a radio failure")
+        connection.value = true
+        rig.radio.clearSentMessages()
+        assertNull(rig.start(), "a cancelled start can be tried again")
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+    }
+
+    @Test
+    fun aFailingReBringUpIsLoggedAndTheNextReconnectServesTheInterruptedNetwork() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
+        rig.radio.clearSentMessages()
+
+        rig.relaunchRadiod(connection)
+        rig.radio.emitEvent(RadioMessage.Error(code = 7u, text = "cannot open the adapter"))
+        runCurrent()
+
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName }, "nothing is served on a radio that did not come up")
+        val failure = rig.logs.entries.single { it.severity == Severity.Error && "left for the next reconnect" in it.message }
+        assertTrue("redoBringUpAfterReconnect(): " in failure.message && "-> message=" in failure.message, failure.message)
+        assertTrue("cannot open the adapter" in failure.message, failure.message)
+
+        // The radio is off the air, and a request says so instead of being taken for a no-op.
+        assertFailsWith<IllegalStateException> { rig.ap.beacon(KartNetworkKind.GAME) }
+        assertEquals(2, rig.radio.sentMessages.size)
+
+        // The next reconnect works, and serves what the radio served before it was lost.
+        rig.relaunchRadiod(connection)
+        rig.radiodReady()
+        assertEquals(
+            listOf("OpenDevice", "Init", "OpenDevice", "Init", "SetIdentity", "StartBeacon"),
+            rig.radio.sentMessages.map { it::class.simpleName },
+        )
+        assertContentEquals(firstStart.beacon, rig.radio.sentOfType<RadioMessage.StartBeacon>().single().beacon)
+        val kart = rig.station(rig.gameKey())
+        rig.associate(kart, rig.identity.gameSsid)
+        assertTrue(rig.discoverGetsThrough(kart, pn = 1), "the kart's key is still the one of the first game network")
+        rig.radio.clearSentMessages()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "and the network counts as served again")
+    }
+
+    @Test
+    fun stopDoesNotWaitBehindAReBringUpInFlight() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        rig.radio.clearSentMessages()
+        rig.relaunchRadiod(connection)
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName }, "waiting for READY")
+
+        val stop = launch { rig.ap.stop() }
+        runCurrent()
+
+        assertTrue(stop.isCompleted, "stop ends the re-bring-up instead of waiting for a READY behind it")
+        assertEquals(listOf("OpenDevice", "Init", "StopBeacon", "Shutdown"), rig.radio.sentMessages.map { it::class.simpleName })
+        rig.radiodReady()
+        assertEquals(4, rig.radio.sentMessages.size, "a READY that comes late changes nothing")
+        assertFailsWith<IllegalStateException> { rig.ap.beacon(KartNetworkKind.GAME) }
+        rig.radio.clearSentMessages()
+        rig.relaunchRadiod(connection)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "the watcher ended with stop")
+        assertFalse(rig.logs.allText().contains("left for the next reconnect"), "a stop is not a failed bring-up")
+    }
+
+    @Test
+    fun aDisconnectDuringAReBringUpEndsItAndTheNextReconnectStartsOver() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
+        rig.radio.clearSentMessages()
+        rig.relaunchRadiod(connection) // the re-bring-up waits for READY
+
+        connection.value = false // and radiod is gone again
+        runCurrent()
+        val request = launch { runCatching { rig.ap.beacon(KartNetworkKind.GAME) } }
+        runCurrent()
+
+        assertTrue(request.isCompleted, "the abandoned bring-up no longer holds the lifecycle lock (a request is answered at once)")
+        assertFalse(rig.logs.allText().contains("left for the next reconnect"), "an abandoned bring-up is not a failure")
+
+        connection.value = true
+        runCurrent()
+        rig.radiodReady()
+
+        assertEquals(
+            listOf("OpenDevice", "Init", "OpenDevice", "Init", "SetIdentity", "StartBeacon"),
+            rig.radio.sentMessages.map { it::class.simpleName },
+        )
+        assertContentEquals(firstStart.beacon, rig.radio.sentOfType<RadioMessage.StartBeacon>().single().beacon)
+    }
+
+    @Test
+    fun theWatcherEndsWhenItsScopeEnds() = runTest {
+        val connection = MutableStateFlow(true)
+        val scope = CoroutineScope(StandardTestDispatcher(testScheduler) + Job())
+        val rig = Rig(this, radioConnection = connection, scope = scope)
+        rig.start()
+        rig.radio.clearSentMessages()
+
+        scope.cancel()
+        runCurrent()
+        rig.relaunchRadiod(connection)
+
+        assertTrue(rig.radio.sentMessages.isEmpty(), "nobody reacts to a reconnect once the scope is gone")
+    }
+
     // ---- platform seams ------------------------------------------------------------------------
 
     @Test
@@ -539,6 +952,31 @@ class RadioKartRadioApTest {
 
     private class HelperCrash : Error("the radio helper crashed")
 
+    /**
+     * A radio whose first OPEN_DEVICE finds radiod gone: the connection flag drops and the command fails, as
+     * `DesktopRadioLink` fails a command once radiod has disconnected. Later commands reach radiod.
+     */
+    private class DisconnectingOpenRadioLink(
+        private val fake: FakeRadioLink,
+        private val connection: MutableStateFlow<Boolean>,
+    ) : RadioLink by fake {
+        private var disconnected = false
+
+        override suspend fun openDevice(vid: Int, pid: Int) {
+            if (!disconnected) {
+                disconnected = true
+                connection.value = false
+                throw IllegalStateException("send(): radiod is not connected -> type=OpenDevice")
+            }
+            fake.openDevice(vid, pid)
+        }
+    }
+
+    /** A [KartRadioAp.start] launched in the background: [outcome] stays null until it finished. */
+    private class PendingStart {
+        var outcome: Result<Unit>? = null
+    }
+
     /** A radio whose START_BEACON takes virtual time, so two requests can overlap unless something serialises them. */
     private class SlowBeaconRadioLink(private val fake: FakeRadioLink) : RadioLink by fake {
         override suspend fun startBeacon(intervalTu: Int, beacon: ByteArray) {
@@ -555,9 +993,11 @@ class RadioKartRadioApTest {
     private class Rig(
         private val test: TestScope,
         radioLink: (FakeRadioLink) -> RadioLink = { it },
-        awaitRadioConnected: suspend () -> Unit = {},
+        awaitRadioConnected: (suspend () -> Unit)? = null,
         onRequestAdapterPermission: () -> Unit = {},
         adapterState: StateFlow<AdapterState> = MutableStateFlow(AdapterState.READY),
+        radioConnection: StateFlow<Boolean>? = null,
+        scope: CoroutineScope = test.backgroundScope,
     ) {
         val crypto = CryptoPrimitives()
         val radio = FakeRadioLink()
@@ -582,9 +1022,10 @@ class RadioKartRadioApTest {
         val ap = RadioKartRadioAp(
             accessPoint = accessPoint,
             pairingStore = store,
-            scope = test.backgroundScope,
+            scope = scope,
             adapterState = adapterState,
             awaitRadioConnected = awaitRadioConnected,
+            radioConnection = radioConnection,
             onRequestAdapterPermission = onRequestAdapterPermission,
             crypto = crypto,
             nonceTable = nonceTable,
@@ -602,12 +1043,35 @@ class RadioKartRadioApTest {
          * when it succeeded.
          */
         fun start(answer: RadioMessage.RadiodToApp? = READY): Throwable? {
-            var outcome: Result<Unit>? = null
-            test.backgroundScope.launch { outcome = runCatching { ap.start() } }
+            val pending = launchStart()
             test.runCurrent()
             if (answer != null) radio.emitEvent(answer)
             test.runCurrent()
-            return checkNotNull(outcome) { "start() did not finish" }.exceptionOrNull()
+            return checkNotNull(pending.outcome) { "start() did not finish" }.exceptionOrNull()
+        }
+
+        /** Launches [KartRadioAp.start] in the background, for a test that plays radiod step by step. */
+        fun launchStart(): PendingStart {
+            val pending = PendingStart()
+            test.backgroundScope.launch { pending.outcome = runCatching { ap.start() } }
+            return pending
+        }
+
+        /** Plays radiod answering a bring-up with READY, and lets the access point (and whoever waits for it) react. */
+        fun radiodReady() {
+            radio.emitEvent(READY)
+            test.runCurrent()
+        }
+
+        /**
+         * Plays radiod going away and the supervisor relaunching it: the link's flag drops and rises again, each change
+         * seen by the collectors before the next one.
+         */
+        fun relaunchRadiod(connection: MutableStateFlow<Boolean>) {
+            connection.value = false
+            test.runCurrent()
+            connection.value = true
+            test.runCurrent()
         }
 
         /** The CCMP key of the pairing network served for [seed]: the nonce of the random draw and `SHA-256(seed)`. */
@@ -661,6 +1125,9 @@ class RadioKartRadioApTest {
         const val RSSI_DBM = -42
         const val REPEATED_REQUESTS = 3
         const val START_BEACON_DELAY_MS = 10L
+
+        // The desktop supervisor's shortest wait before it relaunches radiod.
+        val SUPERVISOR_RESTART_BACKOFF = 500.milliseconds
 
         const val NONCE_COUNT = 0x10000
         const val NONCE_BYTES = 16

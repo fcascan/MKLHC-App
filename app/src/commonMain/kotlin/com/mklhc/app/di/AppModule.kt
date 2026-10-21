@@ -16,27 +16,32 @@ import org.koin.dsl.module
  * The app-level Koin module: the bindings only :app can decide.
  *
  * Business logic: every feature ViewModel depends on a single [KartSession]; the feature modules deliberately do
- * not bind it, so the composition root chooses the implementation. For now that is the scripted
- * [DemoKartSession], so the whole UI runs without a radio or a kart (this is what the desktop run shows). The demo
- * session runs on an application-lifetime scope that is never cancelled; this is acceptable only because the demo
- * drives no hardware.
+ * not bind it, so the composition root chooses the implementation. This module binds the scripted
+ * [DemoKartSession], so the whole UI runs without a radio or a kart. The demo session runs on an application-lifetime
+ * scope that is never cancelled; this is acceptable only because the demo drives no hardware.
  *
- * TODO(production): once the wifi-ap `KartRadioAp` adapter exists, replace this binding with
- * `KartSessionRepository` (constructed with that adapter, a `PairingStore` and a `SessionConfig`), per platform
- * where the adapter differs (a USB adapter on Android, a desktop one or none on the desktop), and make sure the
- * entry points call `KartSession.stop()` on exit so the kart is put to sleep with a final neutral command. The
- * desktop window already stops the session on close; Android does NOT yet (nothing calls stop() and the scope is
- * never cancelled), so a real session would keep the radio and teleop loop running in the background, relying only
- * on the kart's deadman timeout. Before binding the real session, stop it from the Android lifecycle (for example a
- * `ProcessLifecycleOwner` observer, or the Application/Activity teardown) and cancel the session scope.
+ * - The desktop binds the real session: its entry point (`Main.kt`, desktopMain) builds the `DesktopKartRuntime`
+ *   (radiod, the radio access point, the persistent pairing store and `KartSessionRepository`) and overrides this
+ *   binding with the runtime's session through `initKoin`'s extra module, which Koin loads after this one. It keeps
+ *   this demo binding only when asked to, with `MKLHC_DEMO=1` or the `--demo` argument. Its window stops the session
+ *   and shuts the runtime down on close.
+ * - Android still binds the demo: its radio link (USB) is not built yet.
+ *
+ * TODO(production): when the Android radio adapter exists, bind `KartSessionRepository` on Android too (constructed
+ * with that `KartRadioAp`, a `PairingStore` and a `SessionConfig`), and first make sure the Android entry point calls
+ * `KartSession.stop()` on exit so the kart is put to sleep with a final neutral command. Android does NOT do this yet
+ * (nothing calls stop() and the scope is never cancelled), so a real session would keep the radio and teleop loop
+ * running in the background, relying only on the kart's deadman timeout. Before binding the real session there, stop
+ * it from the Android lifecycle (for example a `ProcessLifecycleOwner` observer, or the Application/Activity teardown)
+ * and cancel the session scope.
  */
 val appModule = module {
     single { DemoKartSession(scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)) } bind KartSession::class
 }
 
 /**
- * Every Koin module the app needs, in the order they are loaded: the app module (the [KartSession] binding), then
- * one module per feature (its ViewModel).
+ * Every Koin module the app needs, in the order they are loaded: the app module (the demo [KartSession] binding,
+ * which the desktop overrides with the real session), then one module per feature (its ViewModel).
  */
 fun appKoinModules(): List<Module> = listOf(
     appModule,

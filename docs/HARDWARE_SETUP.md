@@ -2,7 +2,9 @@
 
 MKLHC-App hosts the kart's Wi-Fi network itself, on a commercial USB Wi-Fi adapter driven by a userspace driver. This guide
 gets the adapter ready and runs the **radio spike**, the first end-to-end hardware test: the app beacons a pairing
-network, the kart joins it, and the app writes a decrypted packet capture that opens in Wireshark.
+network, the kart joins it, and the app writes a decrypted packet capture that opens in Wireshark. The last section runs
+the desktop app itself with the radio, to pair the kart and drive it (see
+[Run the desktop app with the radio](#run-the-desktop-app-with-the-radio)).
 
 ## What you need
 
@@ -86,8 +88,9 @@ CMake knows the Visual Studio 2026 generator. The CMake that comes with the Andr
 `-G Ninja`. The vcpkg bundled with Visual Studio only works in manifest mode, so install a standalone vcpkg for libusb
 as described in [`radiod/README.md`](../radiod/README.md).
 
-The spike looks for the result at `radiod/build/Release/radiod.exe`, `radiod/build/radiod.exe` or `radiod/build/radiod`;
-pass `--radiod <path>` if it is somewhere else.
+The spike and the desktop app look for the result at `radiod/build/Release/radiod.exe`, `radiod/build/radiod.exe`,
+`radiod/build/RelWithDebInfo/radiod.exe` or `radiod/build/radiod`; if it is somewhere else, pass `--radiod <path>` to the
+spike, or set `MKLHC_RADIOD` for the app.
 
 ## Run the spike
 
@@ -267,3 +270,102 @@ The capture contains the kart's traffic. Keep it out of the repository (`spike-c
 
 Run the spike once with a stable setup and note what you changed (beacon interval, power, channel, timing): those
 values are the hardware tuning the project records after the spike.
+
+## Run the desktop app with the radio
+
+The desktop app runs the real kart session over the radio: it starts `radiod` itself, brings the radio up, and pairs
+and drives the kart from its screens. Before pairing a kart, read the warning in
+[Start, pair and stop](#start-pair-and-stop): completing pairing replaces the kart's stored pairing. With the adapter
+bound to WinUSB and plugged in, from the repository root:
+
+```
+./gradlew :app:run
+```
+
+`:app:run` starts the app from the repository root, so it finds `radiod` where the spike does. The app takes no options
+on the command line other than `--demo`; it reads environment variables, set in the same shell before the command (in
+PowerShell, for example, `$env:MKLHC_RADIO = "2357:012d"`):
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `MKLHC_RADIO` | The adapter's USB ID as `vvvv:pppp`, in hexadecimal. | `0bda:c812`, the reference adapter. The TP-Link Archer T3U is `2357:012d`. |
+| `MKLHC_RADIOD` | The `radiod` executable. | The first build found in `radiod/build` (see [Build radiod](#build-radiod)), from the working directory. |
+| `MKLHC_DATA_DIR` | Where the app keeps its pairing identity. | `%APPDATA%\MKLHC` on Windows, `~/Library/Application Support/MKLHC` on macOS, `$XDG_CONFIG_HOME/MKLHC` (or `~/.config/MKLHC`) on Linux. |
+| `MKLHC_DEMO` | `1` runs the scripted demo instead: no radio and no kart, for working on the screens. | `0` |
+
+For UI work without hardware, use `MKLHC_DEMO=1` or `./gradlew :app:run --args="--demo"`; the window title then ends in
+`(demo)`. A variable set to an empty value counts as unset. A value the app cannot use (for example
+`MKLHC_RADIO=0bda-c812`) or any other argument stops it at start-up with an error that names the variable or the
+argument; the app never falls back to the demo on its own. Its first log line says what it uses, for example
+`main(): starting -> mode=radio radio=0bda:c812 radiod=<path> dataDirectory=<path>`. When `radiod` is not where the app
+looks, the log has an `ERROR` line `start(): radiod was not found, the radio stays off -> path=<path>` naming
+`MKLHC_RADIOD`, and the app stays on its no-adapter state: build `radiod` or set the variable, then start the app again.
+A path may be given in double quotes (cmd's `set MKLHC_RADIOD="C:\Program Files\radiod.exe"` keeps them); the app drops
+them.
+
+Only one instance runs per data directory: two would fight over the adapter and could each write an identity to the
+same pairing file. A second one stops at start-up, before any window opens, with the `ERROR` line
+`lockDataDirectoryOrExit(): another MKLHC-App is already running with this data directory, not starting` (exit code 3).
+Close the other one first. The lock is the file `instance.lock` in the data directory; the operating system releases it
+when the app ends, however it ends, so a crash never leaves a stale lock behind.
+
+v1 limit: the app is configured only through these environment variables, which `./gradlew :app:run` passes on from
+the shell. A packaged or installed app started from the Start menu or the Finder gets no way to set them, and does not
+find `radiod` by default (it looks under `radiod/build` from its working directory, which is not the repository then).
+Run the app with `./gradlew :app:run` for now.
+
+### The pairing identity
+
+On its first run the app creates its identity and keeps it in `pairing.preferences_pb` in the data directory: a master
+secret (the game network's name and key, and the identity the app presents to the kart, are derived from it), the
+access point's address (BSSID) and the Wi-Fi channel (1, 6 or 11), together with the paired kart and the driving
+settings. The master secret is stored unencrypted: keep the file private, and never copy it into the repository. On
+macOS and Linux the app creates the data directory readable by its owner only; a directory that already exists is left
+as it is, with a warning in the log when other users can reach it (`chmod 700` it). Every later run uses the same
+identity, which is how a paired kart finds the app's game network again.
+
+Deleting the file, or pointing `MKLHC_DATA_DIR` at another directory, makes the app create a new identity on its next
+run. A kart paired with the old identity no longer finds the game network, and must be paired again.
+
+### Start, pair and stop
+
+> **Warning: completing pairing replaces the kart's stored pairing.** In step 4 the app sends the kart the game
+> network's credentials (the `SetGroupInfo` command), as soon as the kart has connected on the pairing network. The kart
+> stores them in place of the pairing it had: it forgets its previous pairing and, from then on, joins this app's game
+> network. The spike never sends this command; the app does. Pair a kart only if you accept that it will have to be
+> paired again with whatever it was used with before. Cancelling or leaving the Pairing screen before the kart has
+> scanned the code changes nothing on the kart.
+
+1. Start the app. It starts `radiod` in the background, which connects to the app within a second or two.
+2. Press **Start** on the Kart link screen to bring the radio up and beacon the game network of a kart that is already
+   paired with this app, or **Pair a kart** to pair one. The radio takes a while to come up, about 50 seconds for the
+   Archer T3U on Windows (see [Bringing the radio up](#bringing-the-radio-up-no-kart-needed)); the screen shows that the
+   radio is starting. If it stays on the no-adapter state instead, `radiod` is not connected: see
+   [If the app does not work](#if-the-app-does-not-work).
+3. On the Pairing screen the app beacons a new pairing network once the radio is up, and shows its QR code in the
+   window. Put the kart in pairing mode (front LEDs blinking) and point its camera at the window.
+4. The kart joins the pairing network and connects. The app completes the pairing handshake and hands the kart the
+   game network's name and key. The kart then resets onto the game network, the app identifies it and remembers it as
+   the paired kart, and the cockpit can drive it.
+
+If `radiod` crashes, the app starts it again and puts the same network back on air, with the same keys, so the kart can
+join again.
+
+To stop, close the window (on macOS, Cmd+Q closes it the same way). The app powers the kart off, or only puts it to
+sleep when the shutdown-on-exit setting is off (it is on by default, kept with the identity in the pairing file, and no
+screen changes it yet), stops the beacon and shuts `radiod` down. That takes a few seconds at most: the app waits at
+most 6 seconds for the kart and the beacon, then at most 6 seconds for `radiod`, and closes anyway. Closing while the
+radio is still coming up is harmless: nothing is on air yet, and `radiod`, busy with the adapter, is killed after a few
+seconds. The app runs the same cleanup when the operating system ends it (a logout, a SIGTERM, Ctrl+C in a terminal),
+but not when it is killed outright: as with the spike, do not stop it with Ctrl+C under Gradle, which on Windows ends it
+without that cleanup; if an adapter keeps beaconing after a hard kill, unplug it.
+
+### If the app does not work
+
+| Symptom | What to check |
+|---|---|
+| `start(): radiod was not found, the radio stays off -> path=<path>` | Build `radiod` (see [Build radiod](#build-radiod)) or set `MKLHC_RADIOD` to its path. |
+| `launchOrNull(): cannot start radiod -> executable=<path>` | The file exists but cannot be run: it is not an executable for this system (a build for another operating system, or not a `radiod` build at all), or it lacks the execute permission on macOS or Linux (`chmod +x`). The supervisor keeps retrying with a growing delay; fix the file or `MKLHC_RADIOD` and start the app again. |
+| `radiod exited` warnings, and the app stays on its no-adapter state | `radiod` crashes at start-up. Its own output is logged under the `radiod-output` tag; on Windows, check that `libusb-1.0.dll` is next to `radiod.exe`. |
+| `another MKLHC-App is already running with this data directory, not starting` | Another instance uses the same data directory (see above): close it. A second instance on another `MKLHC_DATA_DIR` has an identity of its own (a kart paired with the first one does not find it) and needs an adapter of its own (`MKLHC_RADIO`). |
+| `the data directory cannot be used, not starting` | The data directory (or its parent) cannot be created or written. Fix its permissions, or set `MKLHC_DATA_DIR` to a directory you can write. |

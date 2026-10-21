@@ -338,7 +338,7 @@ The link layer the network stack runs on is `RadioAccessPoint` in :core:wifi-ap:
 - The access point does not touch the DHCP lease; whoever runs NetstackNode resets it.
 
 ### Known gaps (follow-ups)
-- After radiod is relaunched by the supervisor, RadioKartRadioAp does not redo bring-up/serve (start() and beacon(GAME) short-circuit); documented as TODO(production wiring).
+- After radiod is relaunched by the supervisor, RadioKartRadioAp did not redo bring-up/serve (start() and beacon(GAME) short-circuit). Fixed 2026-10-21 for the desktop wiring: with `radioConnection` (the link's connected flow) it redoes bringUp and re-serves the same ApConfig on a reconnect while started; a failed re-bring-up makes beacon() fail visibly until the next reconnect.
 - The TCP endpoint keeps one connection per local port and drops a SYN from a new source port while the old connection holds it; the orchestrator does not watch associatedStation during a session, so a kart that resets without FIN/RST cannot reconnect until RTO/keepalive ends the stale connection. The spike aborts its pairing connection when the station leaves for this reason. (Fixed in the follow-up: see the bugfix "A kart that leaves mid-session wedged recovery".)
 - The spike serves the RCD pairing handshake on 5201 but never connects to the kart's pairing service or sends SetGroupInfo, so the kart keeps its stored pairing.
 
@@ -371,3 +371,34 @@ radiod reports no TX status, so the access point cannot probe a station (hostapd
 ### Files
 - core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
 - core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/ApStateMachine.kt
+
+## Desktop app runs the real session over the radio (DesktopKartRuntime)
+
+- id: desktop-app-runs-the-real-session-over-the-radio-desktopkart-20261021-033904
+- type: architecture_decision
+- status: active
+- platform: kmp
+- area: app
+- date: 2026-10-21
+
+### Decision
+The desktop app runs the real session: `DesktopKartRuntime` (app/desktopMain, package com.mklhc.app.desktop) owns a one-task-at-a-time scope (`Dispatchers.Default.limitedParallelism(1)`), the radiod socket in a short temp directory with a random token, `DesktopRadioLink` + `RadiodSupervisor`, `RadioAccessPoint`, `RadioKartRadioAp` (adapterState READY while radiod is connected, `radioConnection = link.connected`), a `DataStorePairingStore` in the data directory and `KartSessionRepository`; `ConfinedKartSession` moves the suspend commands and `cancelPairing` onto that scope (flows, setDriveCommand and setCaptureEnabled pass through). Main binds it through `initKoin(extra = ...)` (Koin 4.1.1 lets the later module override the demo); Android still binds the scripted demo. `MKLHC_DEMO=1` / `--demo` keeps the demo on desktop.
+
+### Configuration (environment)
+`MKLHC_RADIO` (vvvv:pppp, default 0bda:c812; the Archer T3U is 2357:012d), `MKLHC_RADIOD` (default: the radiod build candidates from the repository root, where `:app:run` now runs), `MKLHC_DATA_DIR` (default %APPDATA%\MKLHC, ~/Library/Application Support/MKLHC, $XDG_CONFIG_HOME/MKLHC or ~/.config/MKLHC; pairing file `pairing.preferences_pb`, created owner-only on POSIX), `MKLHC_DEMO`. Invalid values exit with code 2 naming the variable; a second instance on the same data directory is refused (exclusive lock on `instance.lock`, exit code 3).
+
+### Lifecycle rules
+- Exit: one guarded stop (window close, JVM shutdown hook, end of main, Cmd+Q via the close-all-windows quit strategy): session stop (at most 6 s; parks or powers off the kart per the shutdown-on-exit setting, which is on by default, then STOP_BEACON + SHUTDOWN) and then the runtime shutdown (at most 6 s: close the link, wait up to 3 s for radiod to exit, stop the supervisor before its restart backoff, cancel the scopes, delete the socket directory).
+- radiod powers the radio down and exits on socket EOF or reset as it does on SHUTDOWN (radiod/src/main.cpp runSession/runRadiod), but only between commands and not when it is killed.
+- `RadioKartRadioAp` redoes bringUp and re-serves the same ApConfig after a radiod relaunch while started; `start()` retries its bring-up once on the radiod that replaces one that dropped during it (a crash in INIT, or a start right after a stop).
+- `KartSessionRepository` serialises start/startPairing/cancelPairing/stop with one Mutex (`commandLock`), because relaunchOrchestrator suspends before publishing the new job and a command in that gap left an orchestrator running.
+
+### Not verified yet
+No hardware run of the desktop app; Cmd+Q, the shutdown hook in a real run and the POSIX permission tests are untested on this Windows host. A completed pairing sends SetGroupInfo, which replaces the kart's stored pairing.
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopKartRuntime.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopRadioSettings.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/Main.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/RadioKartRadioAp.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt

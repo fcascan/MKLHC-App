@@ -49,9 +49,9 @@ data class DemoTiming(
 /**
  * DEMO / no-hardware kart session: a scripted [KartSession] that lets the whole UI run without a radio or a kart.
  *
- * This is NOT the real session. It talks to nothing, persists nothing and invents everything it publishes; the app
- * binds it for now so the screens can be developed, demonstrated and tested on a desktop. Production binds
- * `KartSessionRepository` instead (see the app's Koin module).
+ * This is NOT the real session. It talks to nothing, persists nothing and invents everything it publishes; it lets
+ * the screens be developed, demonstrated and tested without hardware. Android binds it for now; the desktop binds
+ * `KartSessionRepository` instead and uses this only with `MKLHC_DEMO=1` or `--demo` (see the app's Koin module).
  *
  * Business logic: the session is a small script driven by two commands.
  * - [start] climbs the link ladder the way the real session does, one rung per [DemoTiming.stepDelayMs]:

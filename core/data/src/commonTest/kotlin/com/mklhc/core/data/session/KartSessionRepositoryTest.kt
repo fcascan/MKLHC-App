@@ -20,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.FlowCollector
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -38,6 +40,7 @@ import kotlin.time.Duration.Companion.seconds
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -49,8 +52,9 @@ import kotlin.test.assertTrue
  * over the real [com.mklhc.core.netstack.NetstackNode] + RCD + Fuji stack across the paired in-memory
  * FrameLink: a [FakeKart] completes the real RCD handshake, answers the real control exchange, receives
  * the real teleop datagrams and is handed the app's real LVNI keepalive. The other tests pin the state
- * mapping, teleop safety, telemetry/video surfacing, pairing, recovery, the kart leaving the network and
- * teardown. Everything runs under virtual time via `runTest`.
+ * mapping, teleop safety, telemetry/video surfacing, pairing, recovery, the kart leaving the network,
+ * the lifecycle commands running one at a time in call order, and teardown. Everything runs under virtual
+ * time via `runTest`.
  */
 class KartSessionRepositoryTest {
 
@@ -728,6 +732,106 @@ class KartSessionRepositoryTest {
         )
     }
 
+    // ---- lifecycle commands run one at a time, in call order -----------------------------------
+
+    @Test
+    fun aCancelPairingWhileAStartPairingReplacesItsOrchestratorLeavesNothingRunning() = runTest {
+        val radio = SlowStartRadio(FakeKartRadioAp(), RADIO_START_TIME)
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        repo.startPairing()
+        delay(COMMAND_STEP) // the first orchestrator is inside the radio's start
+        val restart = launch { repo.startPairing() }
+        delay(COMMAND_STEP)
+        assertFalse(restart.isCompleted, "the restart is in the gap: the old orchestrator is cancelled, the new one not yet launched")
+
+        repo.cancelPairing()
+        delay(SETTLE_TIME)
+
+        assertTrue(restart.isCompleted)
+        assertEquals(0, radio.waitingForKart, "no orchestrator is left waiting for the kart")
+        assertFalse(radio.fake.isStarted, "the radio is stopped")
+        assertNull(radio.fake.currentBeacon, "the pairing network is not left on the air")
+        assertNull(repo.pairingQr.value, "no QR is shown")
+        assertEquals(LinkState.Failed("pairing cancelled"), repo.linkState.value)
+    }
+
+    @Test
+    fun twoQuickStartsLeaveExactlyOneOrchestrator() = runTest {
+        val radio = SlowStartRadio(FakeKartRadioAp(), RADIO_START_TIME)
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        repo.start()
+        delay(COMMAND_STEP) // the first orchestrator is inside the radio's start
+
+        val second = launch { repo.start() }
+        val third = launch { repo.start() }
+        delay(SETTLE_TIME)
+
+        assertTrue(second.isCompleted && third.isCompleted)
+        assertEquals(1, radio.waitingForKart, "exactly one orchestrator beacons the game network and waits for the kart")
+        assertEquals(KartNetworkKind.GAME, radio.fake.currentBeacon)
+        assertEquals(LinkState.Beaconing(KartNetworkKind.GAME), repo.linkState.value)
+    }
+
+    @Test
+    fun stopDuringAStartInFlightCompletesItsTeardownEvenWhenItsCallerIsCancelled() = runTest {
+        val radio = SlowStartRadio(FakeKartRadioAp(), RADIO_START_TIME)
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        repo.start()
+        delay(COMMAND_STEP)
+        val restart = launch { repo.start() }
+        delay(COMMAND_STEP)
+        assertFalse(restart.isCompleted, "the restart waits for the first orchestrator to end")
+
+        // stop() waits for the command in flight, and its caller gives up meanwhile.
+        val callerScope = CoroutineScope(coroutineContext + Job())
+        val stopping = callerScope.launch { repo.stop() }
+        delay(COMMAND_STEP)
+        assertFalse(stopping.isCompleted, "stop waits for the start in flight instead of acting on the job it replaces")
+        callerScope.cancel()
+        stopping.join()
+
+        assertTrue(restart.isCompleted, "the start in flight finished first, no deadlock")
+        assertEquals(1, radio.fake.stopCount, "the teardown ran to the end despite the cancelled caller")
+        assertFalse(radio.fake.isStarted)
+        delay(SETTLE_TIME)
+        assertEquals(0, radio.waitingForKart, "the orchestrator the start published was cancelled too")
+        assertFalse(radio.fake.isStarted, "and nothing starts the radio again")
+    }
+
+    @Test
+    fun aStartPairingRightAfterCancelPairingRunsAfterTheCancelAndIsNotUndoneByIt() = runTest {
+        val radio = SlowStartRadio(FakeKartRadioAp(), RADIO_START_TIME)
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        repo.startPairing()
+        delay(COMMAND_STEP) // the first orchestrator is inside the radio's start
+
+        repo.cancelPairing()
+        repo.startPairing()
+        delay(SETTLE_TIME)
+
+        assertEquals(1, radio.waitingForKart, "the new pairing waits for the kart")
+        assertTrue(radio.fake.isStarted)
+        assertEquals(KartNetworkKind.PAIRING, radio.fake.currentBeacon)
+        assertNotNull(repo.pairingQr.value, "the new pairing's QR is shown")
+        assertEquals(LinkState.Beaconing(KartNetworkKind.PAIRING), repo.linkState.value)
+    }
+
+    @Test
+    fun cancelPairingAfterStopDoesNothing() = runTest {
+        val radio = FakeKartRadioAp()
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        repo.startPairing()
+        withTimeout(5_000) { repo.linkState.first { it == LinkState.Beaconing(KartNetworkKind.PAIRING) } }
+        repo.stop()
+        val stateAfterStop = repo.linkState.value
+
+        repo.cancelPairing()
+        delay(COMMAND_STEP)
+
+        assertEquals(1, radio.stopCount, "the radio is not stopped a second time")
+        assertEquals(stateAfterStop, repo.linkState.value, "the link state is left as stop left it")
+    }
+
     // ---- teardown -----------------------------------------------------------------------------
 
     @Test
@@ -796,6 +900,43 @@ private class LateDepartureRadio(private val radio: FakeKartRadioAp, private val
     }
 }
 
+/**
+ * The fake radio as the repository sees it, with a start that takes [startTime] of virtual time and cannot be cut
+ * short, and a count of the coroutines waiting for the kart to associate.
+ *
+ * Business logic: cancelling an orchestrator that is inside this start takes [startTime], as cancelling one whose
+ * teardown takes time does. That is the window in which a lifecycle command replacing the orchestrator has cancelled
+ * the old job but not yet launched the new one, stretched so a test can issue another command inside it. An
+ * orchestrator that reached the beaconing phase waits for the kart in [associatedStation], so until a kart associates
+ * [waitingForKart] is the number of orchestrators running. Everything else is the fake's.
+ */
+@OptIn(ExperimentalForInheritanceCoroutinesApi::class)
+private class SlowStartRadio(val fake: FakeKartRadioAp, private val startTime: Duration) : KartRadioAp by fake {
+    /** How many coroutines are collecting [associatedStation] now. */
+    var waitingForKart = 0
+        private set
+
+    override suspend fun start() {
+        withContext(NonCancellable) { delay(startTime) }
+        fake.start()
+    }
+
+    override val associatedStation: StateFlow<Boolean> = object : StateFlow<Boolean> {
+        override val value: Boolean get() = fake.associatedStation.value
+
+        override val replayCache: List<Boolean> get() = listOf(value)
+
+        override suspend fun collect(collector: FlowCollector<Boolean>): Nothing {
+            waitingForKart++
+            try {
+                fake.associatedStation.collect(collector)
+            } finally {
+                waitingForKart--
+            }
+        }
+    }
+}
+
 /** An in-memory store that counts how often the paired kart is saved; everything else is the wrapped store's. */
 private class CountingPairingStore(private val inner: InMemoryPairingStore) : PairingStore by inner {
     var pairedKartSaves = 0
@@ -812,3 +953,12 @@ private const val STATION_LEFT = "the kart left the network"
 
 /** How late [LateDepartureRadio] lets the repository's watchers see a departure; shorter than the kart's connect retries. */
 private val DEPARTURE_LAG = 500.milliseconds
+
+/** How long [SlowStartRadio] takes to start the radio. */
+private val RADIO_START_TIME = 1.seconds
+
+/** Virtual time for the coroutines a command launched to reach their next wait, well inside [RADIO_START_TIME]. */
+private val COMMAND_STEP = 10.milliseconds
+
+/** Virtual time for every orchestrator to settle: several radio starts. */
+private val SETTLE_TIME = 10.seconds

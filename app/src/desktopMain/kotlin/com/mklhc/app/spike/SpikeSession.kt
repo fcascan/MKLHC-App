@@ -1,6 +1,7 @@
 package com.mklhc.app.spike
 
 import co.touchlab.kermit.Logger
+import com.mklhc.app.desktop.findRadiodExecutable
 import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.netstack.AddressPlan
 import com.mklhc.core.netstack.NetstackConfig
@@ -124,7 +125,8 @@ internal suspend fun runSpikeSession(
     // removed as soon as the run starts stopping, or by the outer finally if setup fails before the capture starts.
     var qrImage: Path? = null
     try {
-        val radiod = args.radiod ?: findRadiodExecutable()
+        // The candidates relative to the working directory, which is the repository root under Gradle.
+        val radiod = args.radiod ?: findRadiodExecutable(Path.of(""))
         if (radiod == null || !Files.isRegularFile(radiod)) {
             console("error: the radiod executable was not found${radiod?.let { " at $it" }.orEmpty()}.")
             console("Build it (see radiod/README.md and docs/HARDWARE_SETUP.md) or pass --radiod <path>.")
@@ -455,9 +457,6 @@ private fun deleteQrImage(image: Path, console: (String) -> Unit) {
     }
 }
 
-private fun findRadiodExecutable(): Path? =
-    RADIOD_CANDIDATES.map { Path.of(it) }.firstOrNull { Files.isRegularFile(it) }
-
 /** A [PcapSink] that streams to a file; every record is written straight through, so a killed run keeps its capture. */
 internal class FilePcapSink(path: Path) : PcapSink, AutoCloseable {
     private val output: OutputStream = Files.newOutputStream(path)
@@ -479,9 +478,3 @@ private const val SESSION_JOBS_END_TIMEOUT_MS = 3_000L
 private const val STOP_FILE_REASON = "stop file found"
 
 private val FILE_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
-private val RADIOD_CANDIDATES = listOf(
-    "radiod/build/Release/radiod.exe",
-    "radiod/build/radiod.exe",
-    "radiod/build/RelWithDebInfo/radiod.exe",
-    "radiod/build/radiod",
-)

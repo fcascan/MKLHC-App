@@ -41,6 +41,7 @@ import com.mklhc.core.netstack.tcp.TcpConnection
 import com.mklhc.core.netstack.tcp.TcpListener
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -50,6 +51,7 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -60,6 +62,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -126,7 +130,10 @@ import kotlin.time.TimeSource
  * Threading: like the layers it composes this class is NOT thread-safe and must be driven from a
  * single-threaded [scope] (in production a `limitedParallelism(1)` dispatcher); [setDriveCommand] is the
  * one exception, written to be safe from any thread. Everything it launches is a child of [scope], so
- * [stop] (or cancelling [scope]) ends every coroutine and timer it started.
+ * [stop] (or cancelling [scope]) ends every coroutine and timer it started. The lifecycle commands ([start],
+ * [startPairing], [cancelPairing] and [stop]) each replace or end the orchestrator across suspensions, so one
+ * [Mutex] runs them one at a time, in the order they were called: two quick starts leave one orchestrator, and a
+ * cancel never acts on an orchestrator that is being replaced while the replacement keeps running.
  *
  * @param radioAp the radio + access-point edge the network stack runs on.
  * @param pairingStore the installation identity, paired kart and user settings.
@@ -228,6 +235,13 @@ class KartSessionRepository(
     private var orchestratorJob: Job? = null
 
     /**
+     * Serialises the lifecycle commands: [start], [startPairing], the work [cancelPairing] launches, and the teardown of
+     * [stop]. Each one replaces or ends the orchestrator across suspensions (a cancelAndJoin, stopping the node), so
+     * without it a command arriving in that window would act on the job being replaced and leave the new one running.
+     */
+    private val commandLock = Mutex()
+
+    /**
      * The running network stack's DHCP server, or null while no stack runs. Only this module's tests read it, to
      * check that the kart's lease is freed when a session or a pairing attempt ends.
      */
@@ -240,7 +254,7 @@ class KartSessionRepository(
      */
     override suspend fun start() {
         log.i { "start(): starting the session flow" }
-        relaunchOrchestrator(startWithPairing = false)
+        commandLock.withLock { relaunchOrchestrator(startWithPairing = false) }
     }
 
     /**
@@ -250,7 +264,7 @@ class KartSessionRepository(
      */
     override suspend fun startPairing() {
         log.i { "startPairing(): starting the pairing flow" }
-        relaunchOrchestrator(startWithPairing = true)
+        commandLock.withLock { relaunchOrchestrator(startWithPairing = true) }
     }
 
     /**
@@ -258,28 +272,38 @@ class KartSessionRepository(
      * orchestrator, brings the pairing beacon and the network stack down so the radio is not left advertising
      * the pairing network, and settles the link on a terminal state so the UI is not stuck on
      * [LinkState.Beaconing]. A later [start] / [startPairing] restarts the flow.
+     *
+     * Business logic: the work is launched, since this is not a suspending call, and runs under the command lock, so it
+     * cancels whichever orchestrator is current once the command before it is done (a [startPairing] still replacing
+     * its orchestrator publishes the new one first, and that is the one cancelled). It is launched undispatched, so it
+     * takes its place in the lock's queue before this returns: a [start] / [startPairing] called right after runs after
+     * the cancel and is not undone by it. After [stop] the launched work does nothing.
      */
     override fun cancelPairing() {
         log.i { "cancelPairing(): cancelling" }
         _pairingQr.value = null
-        val cancelled = orchestratorJob
-        orchestratorJob = null
-        repositoryScope.launch {
-            cancelled?.cancelAndJoin()
-            withContext(NonCancellable) {
-                try {
-                    node?.stop()
-                } catch (failure: Exception) {
-                    log.w { "cancelPairing(): stopping the node failed -> message=${failure.message}" }
+        repositoryScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            commandLock.withLock {
+                // An undispatched start runs even in a cancelled scope, and a free lock is taken without a check.
+                ensureActive()
+                val cancelled = orchestratorJob
+                orchestratorJob = null
+                cancelled?.cancelAndJoin()
+                withContext(NonCancellable) {
+                    try {
+                        node?.stop()
+                    } catch (failure: Exception) {
+                        log.w { "cancelPairing(): stopping the node failed -> message=${failure.message}" }
+                    }
+                    node = null
+                    try {
+                        radioAp.stop()
+                    } catch (failure: Exception) {
+                        log.w { "cancelPairing(): stopping the beacon failed -> message=${failure.message}" }
+                    }
                 }
-                node = null
-                try {
-                    radioAp.stop()
-                } catch (failure: Exception) {
-                    log.w { "cancelPairing(): stopping the beacon failed -> message=${failure.message}" }
-                }
+                setState(LinkState.Failed("pairing cancelled"))
             }
-            setState(LinkState.Failed("pairing cancelled"))
         }
     }
 
@@ -316,6 +340,11 @@ class KartSessionRepository(
      * Stops the session: sleeps the kart and sends a final neutral if reachable, then tears everything
      * down. This is terminal; after it every coroutine the repository started has ended and the instance
      * is not restarted.
+     *
+     * Business logic: the safety calls come first and do not wait for anything, so the kart is parked at once even
+     * while a command is in flight. The teardown then takes the command lock: a [start] that is still replacing its
+     * orchestrator finishes first (it only waits for the old orchestrator to end, never for this), and the orchestrator
+     * it published is the one cancelled here, so none is left running. The wait for the lock is not cancellable either.
      */
     override suspend fun stop(): Unit = withContext(NonCancellable) {
         // All of teardown runs under NonCancellable so a cancelled caller (a closing screen scope) can never
@@ -334,28 +363,34 @@ class KartSessionRepository(
         } catch (failure: Exception) {
             log.w { "stop(): parking or powering off the kart failed -> shutdownOnExit=$shutdownOnExit message=${failure.message}" }
         }
-        try {
-            orchestratorJob?.cancelAndJoin()
-        } catch (failure: Exception) {
-            log.w { "stop(): cancelling the orchestrator failed -> message=${failure.message}" }
+        commandLock.withLock {
+            try {
+                orchestratorJob?.cancelAndJoin()
+            } catch (failure: Exception) {
+                log.w { "stop(): cancelling the orchestrator failed -> message=${failure.message}" }
+            }
+            orchestratorJob = null
+            try {
+                node?.stop()
+            } catch (failure: Exception) {
+                log.w { "stop(): stopping the node failed -> message=${failure.message}" }
+            }
+            node = null
+            try {
+                radioAp.stop()
+            } catch (failure: Exception) {
+                log.w { "stop(): stopping the radio failed -> message=${failure.message}" }
+            }
+            repositoryJob.cancel()
         }
-        orchestratorJob = null
-        try {
-            node?.stop()
-        } catch (failure: Exception) {
-            log.w { "stop(): stopping the node failed -> message=${failure.message}" }
-        }
-        node = null
-        try {
-            radioAp.stop()
-        } catch (failure: Exception) {
-            log.w { "stop(): stopping the radio failed -> message=${failure.message}" }
-        }
-        repositoryJob.cancel()
     }
 
     // ---- orchestration ------------------------------------------------------------------------
 
+    /**
+     * Replaces the orchestrator with a new one; call with [commandLock] held, so no other command sees the old job
+     * after it was cancelled and before the new one is published.
+     */
     private suspend fun relaunchOrchestrator(startWithPairing: Boolean) {
         orchestratorJob?.cancelAndJoin()
         withContext(NonCancellable) { runCatching { node?.stop() } }

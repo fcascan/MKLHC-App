@@ -40,7 +40,8 @@ kotlin {
             implementation(libs.koin.android)
         }
         desktopMain.dependencies {
-            // The radio hardware spike (Task 1.8, com.mklhc.app.spike) wires the desktop radio link, the software
+            // The desktop runtime (com.mklhc.app.desktop) wires the real session over the desktop radio link and the
+            // software access point; the radio hardware spike (Task 1.8, com.mklhc.app.spike) wires the link, the
             // access point, the network stack and the capture writer by hand, outside Koin and the UI.
             implementation(project(":core:radio"))
             implementation(project(":core:wifi-ap"))
@@ -57,6 +58,19 @@ kotlin {
             // Scans the spike's SVG pairing QR code back, as the kart's camera would.
             implementation(libs.zxing.core)
         }
+    }
+}
+
+// The desktop app's run tasks (`run`, and `runRelease` for the ProGuard build, both JavaExec tasks the Compose plugin
+// registers) start from the repository root, like runSpike below, so the default radiod path (radiod/build/...)
+// resolves; the radio, radiod and data directory come from the MKLHC_* environment variables (docs/HARDWARE_SETUP.md).
+// Configured on the tasks, not in compose.desktop.application.jvmArgs, which would also go into the packaged app. The
+// UTF-8 flags go through an argument provider because the Compose plugin assigns the task's jvmArgs list itself.
+val desktopRunTasks = setOf("run", "runRelease")
+tasks.withType<JavaExec>().configureEach {
+    if (name in desktopRunTasks) {
+        workingDir = rootProject.projectDir
+        jvmArgumentProviders.add(CommandLineArgumentProvider { listOf("-Dfile.encoding=UTF-8", "-Dstdout.encoding=UTF-8") })
     }
 }
 
