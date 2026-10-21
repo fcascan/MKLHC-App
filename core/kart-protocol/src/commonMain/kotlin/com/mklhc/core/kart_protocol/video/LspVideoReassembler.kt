@@ -1,6 +1,7 @@
 // Adapted from mk-live https://github.com/olus85/mk-live, src/mk_live/video_worker.py (MIT).
-// The continuation header, the chunk length and the sequence-number check are original: they follow the layout
-// measured from the kart's stream on 2026-10-21 (see LspVideo), which the reference does not handle.
+// The continuation header, the chunk length, the frame-end field and the sequence-number check are original: they
+// follow the layout measured from the kart's stream on 2026-10-21 and checked with FFmpeg (see LspVideo), which the
+// reference does not handle.
 package com.mklhc.core.kart_protocol.video
 
 import co.touchlab.kermit.Logger
@@ -11,9 +12,9 @@ import co.touchlab.kermit.Logger
  * Business logic: the kart sends each video frame as one or more datagrams, each starting with a
  * [LspVideo.DATAGRAM_HEADER]-octet header (sequence number, group, chunk header) and ending with an
  * [LspVideo.PACKET_TRAILER]-octet trailer, neither of which is H.264. The first datagram of a frame carries a
- * "FRAM" record (see [findFramStart]) that gives the frame's total H.264 length and where its H.264 starts; the
- * rest follows in continuation datagrams. A frame is complete when its H.264 length is reached; it is then handed
- * out as exactly that many octets.
+ * "FRAM" record (see [findFramStart]) that gives the frame's H.264 length and where its H.264 starts; the rest
+ * follows in continuation datagrams. A frame is complete when its H.264 length is reached; it is then handed out
+ * as exactly that many octets.
  *
  * Rules, in the order [feed] applies them to each datagram:
  * 1. A datagram shorter than its header and trailer is dropped (it cannot hold anything) and logged at debug
@@ -24,12 +25,16 @@ import co.touchlab.kermit.Logger
  *    it can no longer come out right.
  * 3. A datagram for which [findFramStart] finds a record STARTS a frame, taking its bytes from `rawStart` up to
  *    the trailer.
- * 4. Any other datagram is a CONTINUATION. Its H.264 starts right after the header. When its chunk header gives
- *    a length ([LspVideo.CHUNK_WITH_LENGTH]) the chunk holds `length + 1` octets, and whatever follows it before
- *    the trailer is stale padding, not counted anywhere; otherwise (the last datagram of a group) the H.264 runs
- *    to the trailer. With no frame in progress the datagram is dropped and logged at debug level.
+ * 4. Any other datagram is a CONTINUATION. When its chunk header gives a length ([LspVideo.CHUNK_WITH_LENGTH]) the
+ *    H.264 is the `length + 1` octets right after the header, and whatever follows it before the trailer is stale
+ *    padding, not counted anywhere; otherwise (the frame's last datagram) the [LspVideo.FRAME_END_FIELD] comes
+ *    first and the H.264 runs from after it to the trailer. With no frame in progress the datagram is dropped and
+ *    logged at debug level.
  * 5. When the frame reaches its H.264 length it is emitted and the state is cleared. Octets beyond the length
- *    (the last datagram of a frame is padded with stale octets) are trimmed and counted in [bytesDropped].
+ *    (the last datagram of a frame is padded with stale octets) are trimmed and counted in [bytesDropped]. A
+ *    frame can reach its length before its last datagram: the kart sometimes ends a sized chunk with the next
+ *    frame's start code (`00 00 01 09`), past the frame's length; that last datagram then arrives with no frame
+ *    in progress and is dropped.
  *
  * INCOMPLETE-FRAME POLICY: if a new frame starts while the previous one is still incomplete, or a datagram of it
  * was lost (rule 2), the incomplete frame is DROPPED, never emitted as a partial frame; a warning is logged,
@@ -38,14 +43,12 @@ import co.touchlab.kermit.Logger
  * the frame the same way (logged at debug level) and forgets the sequence. A partial access unit would only
  * corrupt the decoder's picture, so the decoder is left to resynchronise on the next frame.
  *
- * Memory is bounded: the buffer of a frame is allocated at its announced H.264 length, which
- * [findFramStart] caps at [LspVideo.MAX_FRAM_PACKET_SIZE] minus [LspVideo.FRAM_SIZE_OVERHEAD], and nothing
- * is ever appended beyond it, so a malformed stream cannot grow memory without bound.
+ * Memory is bounded: the buffer of a frame is allocated at its announced H.264 length, which [findFramStart]
+ * caps at [LspVideo.MAX_FRAM_PACKET_SIZE] minus [LspVideo.FRAM_SIZE_OVERHEAD] and [LspVideo.FRAME_END_FIELD], and
+ * nothing is ever appended beyond it, so a malformed stream cannot grow memory without bound.
  *
- * Known limits: a continuation that happens to hold "FRAM" at the right offset would be taken for a new start;
- * and in the measured stream 14 of 2,185 frames hold a continuation of odd length (chunk length 0x56e-0x571):
- * they are emitted at their FRAM length but complete one datagram early, so their last datagram is then dropped
- * as a continuation with no frame in progress and their final octet may be wrong (open question).
+ * Known limit: a continuation that happens to hold "FRAM" at the right offset would be taken for a new start.
+ * Checked against a 2,185-frame capture: FFmpeg decodes every frame rebuilt by these rules without an error.
  *
  * Pure byte processing: not suspending, no I/O, and not thread-safe (one coroutine feeds it). The counters
  * are exposed for tests and diagnostics.
@@ -82,8 +85,9 @@ class LspVideoReassembler(
 
     /**
      * Octets discarded without reaching an emitted frame: the full size of each dropped datagram, the
-     * buffered octets of each abandoned frame, and surplus octets trimmed off a completed frame. The headers
-     * and trailers of accepted datagrams, and the stale octets after a chunk of known length, are not counted.
+     * buffered octets of each abandoned frame, and surplus octets trimmed off a completed frame. The headers,
+     * frame-end fields and trailers of accepted datagrams, and the stale octets after a chunk of known length, are
+     * not counted.
      */
     var bytesDropped: Long = 0
         private set
@@ -124,7 +128,7 @@ class LspVideoReassembler(
                 dropDatagram(datagram, "continuation with no frame in progress")
                 return emptyList()
             }
-            append(datagram, LspVideo.DATAGRAM_HEADER, chunkEnd(datagram, payloadEnd))
+            appendContinuation(datagram, payloadEnd)
         }
         return completedFrame()
     }
@@ -150,14 +154,18 @@ class LspVideoReassembler(
     }
 
     /**
-     * Where a continuation's H.264 ends: after its chunk when the chunk header gives a length (never past the
-     * trailer), otherwise at the trailer.
+     * Appends a continuation's H.264: the sized chunk right after the header (never past the trailer) when the chunk
+     * header gives a length, otherwise (the frame's last datagram) everything from after the frame-end field to the
+     * trailer.
      */
-    private fun chunkEnd(datagram: ByteArray, payloadEnd: Int): Int {
+    private fun appendContinuation(datagram: ByteArray, payloadEnd: Int) {
         val field = u16BigEndian(datagram, LspVideo.CHUNK_FIELD_OFFSET)
-        if ((field ushr Byte.SIZE_BITS) and LspVideo.CHUNK_TYPE_MASK != LspVideo.CHUNK_WITH_LENGTH) return payloadEnd
-        val length = (field and LspVideo.CHUNK_LENGTH_MASK) + 1
-        return minOf(LspVideo.DATAGRAM_HEADER + length, payloadEnd)
+        if (((field ushr Byte.SIZE_BITS) and LspVideo.CHUNK_TYPE_MASK) == LspVideo.CHUNK_WITH_LENGTH) {
+            val length = (field and LspVideo.CHUNK_LENGTH_MASK) + 1
+            append(datagram, LspVideo.DATAGRAM_HEADER, minOf(LspVideo.DATAGRAM_HEADER + length, payloadEnd))
+        } else {
+            append(datagram, LspVideo.DATAGRAM_HEADER + LspVideo.FRAME_END_FIELD, payloadEnd)
+        }
     }
 
     /** Copies `datagram[from, to)` into the frame buffer, trimming what does not fit. */

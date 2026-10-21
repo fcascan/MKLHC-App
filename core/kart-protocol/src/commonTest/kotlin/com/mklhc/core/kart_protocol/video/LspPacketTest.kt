@@ -243,14 +243,14 @@ class LspPacketTest {
 
     @Test
     fun `a literal FRAM at offset 13 without L2 is a start`() {
-        // 47 octets before the H.264: [0..11] 0x11, [12] 0x1f, [13..16] "FRAM", [17..20] size 0x2a (42 =
-        // 8 H.264 octets + 34), [21..46] 0x22. Then the 8 H.264 octets and the 8-octet trailer.
+        // 47 octets before the H.264: [0..11] 0x11, [12] 0x1f, [13..16] "FRAM", [17..20] size 0x2e (46 =
+        // 8 H.264 octets + 34 + 4), [21..46] 0x22. Then the 8 H.264 octets and the 8-octet trailer.
         val pkt = hexBytes(
             """
             11 11 11 11 11 11 11 11 11 11 11 11
             1f
             46 52 41 4d
-            00 00 00 2a
+            00 00 00 2e
             ${"22 ".repeat(26)}
             00 00 00 01 65 88 84 21
             ee ee ee ee ee ee ee 02
@@ -264,7 +264,7 @@ class LspPacketTest {
     @Test
     fun `a literal FRAM at offset 43 with a valid L2 block is a start`() {
         // [0..7] 0x33, [8..9] "L2", [10..11] checksum 0x2aaa, [12..19] value 0xfedcba9876543210, [20..41]
-        // 0x33, [42] 0x1f, [43..46] "FRAM", [47..50] size 0x2a, [51..76] 0x22, then H.264 + trailer.
+        // 0x33, [42] 0x1f, [43..46] "FRAM", [47..50] size 0x2e, [51..76] 0x22, then H.264 + trailer.
         val pkt = hexBytes(
             """
             33 33 33 33 33 33 33 33
@@ -274,7 +274,7 @@ class LspPacketTest {
             ${"33 ".repeat(22)}
             1f
             46 52 41 4d
-            00 00 00 2a
+            00 00 00 2e
             ${"22 ".repeat(26)}
             00 00 00 01 65 88 84 21
             ee ee ee ee ee ee ee 02
@@ -347,10 +347,11 @@ class LspPacketTest {
     fun `the packet size must be positive and at most 2 MiB`() {
         val sizes = mapOf<Long, Boolean>(
             0L to false, // not positive
-            1L to false, // expected = 1 - 34 < 0
-            34L to false, // expected = 0
-            35L to true, // expected = 1, the smallest accepted
-            42L to true,
+            1L to false, // expected = 1 - 38 < 0
+            34L to false, // only the FRAM record
+            38L to false, // the FRAM record and the frame-end field: expected = 0
+            39L to true, // expected = 1, the smallest accepted
+            46L to true,
             (2L * 1024 * 1024) to true, // the cap itself is accepted
             (2L * 1024 * 1024 + 1) to false, // one over the cap
             0x7fffffffL to false,
@@ -364,7 +365,7 @@ class LspPacketTest {
 
             if (accepted) {
                 assertEquals(
-                    FramStart(expectedH264Len = (size - 34).toInt(), rawStart = 47, framOffset = 13),
+                    FramStart(expectedH264Len = (size - 38).toInt(), rawStart = 47, framOffset = 13),
                     start,
                     "size $size",
                 )
@@ -378,7 +379,7 @@ class LspPacketTest {
     fun `the 2 MiB cap also applies to a FRAM at 43`() {
         assertNull(findFramStart(startAt43(2L * 1024 * 1024 + 1, IDR_8)))
         assertEquals(
-            2 * 1024 * 1024 - 34,
+            2 * 1024 * 1024 - 38,
             findFramStart(startAt43(2L * 1024 * 1024, IDR_8))?.expectedH264Len,
         )
     }
@@ -466,7 +467,7 @@ class LspPacketTest {
     }
 
     @Test
-    fun `the expected H264 length is the FRAM size minus 34`() {
+    fun `the expected H264 length is the FRAM size minus 38`() {
         for (h264Len in listOf(1, 8, 1188, 65_000)) {
             val pkt = startAt13(framSizeFor(h264Len), IDR_8)
 

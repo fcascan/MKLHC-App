@@ -27,8 +27,10 @@ import com.mklhc.core.kart_protocol.hexBytes
  * continuation datagram (chunk with a length, like the kart's 85 72):
  *   [0..7] header   [8..10] 0a 00 <seq low>   [11..12] 0x80 | (n - 1), 11 bits   [13..] the n H.264 octets
  *   then stale padding, if any   [last 8] trailer
- * last datagram of a group (chunk without a length, like the kart's ba 00):
- *   [0..7] header   [8..10] 0a 00 <seq low>   [11..12] ba 00   [13..] H.264 then stale padding   [last 8] trailer
+ * last datagram of a frame (chunk without a length, like the kart's ba 00):
+ *   [0..7] header   [8..10] 0a 00 <seq low>   [11..12] ba 00   [13..16] frame-end field
+ *   [17..] H.264 then stale padding   [last 8] trailer
+ * The FRAM size counts the FRAM record and the frame-end field: a frame of n H.264 octets has the size n + 38.
  * ```
  */
 internal object LspTestVectors {
@@ -63,8 +65,12 @@ internal object LspTestVectors {
      */
     val STALE: ByteArray = hexBytes("ec c1 00 00 00 01 09 30")
 
-    /** The H.264 size field a start datagram needs so that the frame's H.264 length is [h264Length]. */
-    fun framSizeFor(h264Length: Int): Long = (h264Length + LspVideo.FRAM_SIZE_OVERHEAD).toLong()
+    /** The FRAM size field of a frame whose H.264 is [h264Length] octets: it also counts the record and the field. */
+    fun framSizeFor(h264Length: Int): Long =
+        (h264Length + LspVideo.FRAM_SIZE_OVERHEAD + LspVideo.FRAME_END_FIELD).toLong()
+
+    /** The 4-octet field after the header of a frame's last datagram (made-up value; the kart's steps per frame). */
+    val FRAME_END_FIELD: ByteArray = hexBytes("fa fb fc fd")
 
     /** An 8-octet trailer: seven 0xee octets and a counter octet (counts up by 2 per packet). */
     fun trailer(counter: Int = 0x02): ByteArray = hexBytes("ee ee ee ee ee ee ee") + byteArrayOf(counter.toByte())
@@ -123,18 +129,19 @@ internal object LspTestVectors {
     }
 
     /**
-     * The last datagram of a group: its chunk header ([chunkType] then 00; the kart sends ba, b6 or be) gives no
-     * length, so everything up to the trailer is taken and the frame length cuts [padding] off.
+     * The last datagram of a frame: its chunk header ([chunkType] then 00; the kart sends ba, b6 or be) gives no
+     * length; the [FRAME_END_FIELD] follows, then everything up to the trailer is taken and the frame length cuts
+     * [padding] off.
      */
-    fun lastOfGroup(
+    fun lastOfFrame(
         h264: ByteArray,
         seq: Int,
         padding: ByteArray = ByteArray(0),
         trailerCounter: Int = 0x02,
         chunkType: Int = 0xba,
     ): ByteArray =
-        header(seq, index = 2) + byteArrayOf(0x0a, 0x00, seq.toByte(), chunkType.toByte(), 0x00) + h264 + padding +
-            trailer(trailerCounter)
+        header(seq, index = 2) + byteArrayOf(0x0a, 0x00, seq.toByte(), chunkType.toByte(), 0x00) + FRAME_END_FIELD +
+            h264 + padding + trailer(trailerCounter)
 
     private const val LENGTH_FIELD_MAX = 0x7FF
 }

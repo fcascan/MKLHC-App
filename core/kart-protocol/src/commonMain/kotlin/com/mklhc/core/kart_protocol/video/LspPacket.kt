@@ -8,8 +8,8 @@ package com.mklhc.core.kart_protocol.video
  * what [findFramStart] reads out of it so [LspVideoReassembler] knows how long the frame is and where its
  * H.264 bytes begin.
  *
- * @property expectedH264Len total H.264 octets of the frame across all its datagrams (the FRAM size minus
- *   [LspVideo.FRAM_SIZE_OVERHEAD]); always positive.
+ * @property expectedH264Len total H.264 octets of the frame across all its datagrams: the FRAM size minus
+ *   [LspVideo.FRAM_SIZE_OVERHEAD] and [LspVideo.FRAME_END_FIELD], which the size also counts; always positive.
  * @property rawStart offset in the datagram of the first H.264 octet (an Annex-B start code).
  * @property framOffset offset in the datagram of the "FRAM" tag: [LspVideo.FRAM_OFFSET_PLAIN] or
  *   [LspVideo.FRAM_OFFSET_WITH_L2].
@@ -111,7 +111,8 @@ fun l2ChecksumOk(pkt: ByteArray, off: Int = LspVideo.L2_OFFSET): Boolean {
  * [LspVideo.FRAM_OFFSET_WITH_L2]; a candidate at the later offset only counts if the "L2" block at
  * [LspVideo.L2_OFFSET] has a valid checksum. A candidate is accepted when its big-endian u32 size, which
  * follows the tag, is in `1..`[LspVideo.MAX_FRAM_PACKET_SIZE] and leaves a positive H.264 length once
- * [LspVideo.FRAM_SIZE_OVERHEAD] is subtracted; a rejected candidate falls through to the next offset.
+ * [LspVideo.FRAM_SIZE_OVERHEAD] and [LspVideo.FRAME_END_FIELD] are subtracted; a rejected candidate falls through to
+ * the next offset.
  *
  * The H.264 start is taken from the length octet just before the tag (`rawStart = framOffset - 1 +
  * length + 4`, the octet read as unsigned) when that lands exactly on an Annex-B start code; otherwise
@@ -135,7 +136,7 @@ fun findFramStart(pkt: ByteArray): FramStart? {
             rawStart = findAnnexbStart(pkt, framOffset + FRAM_HEADER_SIZE) ?: continue
         }
 
-        val expected = packetSize - LspVideo.FRAM_SIZE_OVERHEAD
+        val expected = packetSize - LspVideo.FRAM_SIZE_OVERHEAD - LspVideo.FRAME_END_FIELD
         if (expected > 0) return FramStart(expected.toInt(), rawStart, framOffset)
     }
     return null

@@ -9,7 +9,7 @@ import com.mklhc.core.kart_protocol.video.LspTestVectors.IDR_8
 import com.mklhc.core.kart_protocol.video.LspTestVectors.STALE
 import com.mklhc.core.kart_protocol.video.LspTestVectors.continuation
 import com.mklhc.core.kart_protocol.video.LspTestVectors.framSizeFor
-import com.mklhc.core.kart_protocol.video.LspTestVectors.lastOfGroup
+import com.mklhc.core.kart_protocol.video.LspTestVectors.lastOfFrame
 import com.mklhc.core.kart_protocol.video.LspTestVectors.startAt13
 import com.mklhc.core.kart_protocol.video.LspTestVectors.startAt43
 import kotlin.test.Test
@@ -82,8 +82,8 @@ class LspVideoReassemblerTest {
 
     @Test
     fun `a frame spanning three datagrams is emitted when the last one arrives`() {
-        // FRAM size 56 = 22 + 34. Start carries part 1 (8), then 8 and 6 octets in continuations.
-        val start = startAt13(framSizeFor(22), part1, trailerCounter = 0x02, seq = 0)
+        // FRAM size 60 = 22 + 34 + 4. Start carries part 1 (8), then 8 and 6 octets in continuations.
+        val start = startAt13(60L, part1, trailerCounter = 0x02, seq = 0)
         val cont1 = continuation(part2, seq = 1, trailerCounter = 0x04)
         val cont2 = continuation(part3, seq = 2, trailerCounter = 0x06)
 
@@ -156,12 +156,72 @@ class LspVideoReassemblerTest {
         val frames = listOf(
             startAt13(framSizeFor(22), part1, seq = 0),
             continuation(part2, seq = 1),
-            lastOfGroup(part3, seq = 2, padding = STALE),
+            lastOfFrame(part3, seq = 2, padding = STALE),
         ).flatMap { reassembler.feed(it) }
 
         assertEquals(1, frames.size)
         assertBytes(frame22, frames.single(), "frame")
         assertEquals(STALE.size.toLong(), reassembler.bytesDropped, "the padding is the surplus")
+    }
+
+    @Test
+    fun `the frame-end field of the last datagram never reaches the frame`() {
+        val frames = listOf(
+            startAt13(framSizeFor(22), part1, seq = 0),
+            continuation(part2, seq = 1),
+            lastOfFrame(part3, seq = 2),
+        ).flatMap { reassembler.feed(it) }
+
+        assertBytes(frame22, frames.single(), "frame")
+        assertEquals(0L, reassembler.bytesDropped, "the field is skipped, not taken in and trimmed as surplus")
+    }
+
+    @Test
+    fun `the FRAM size counts the record and the frame-end field, so the frame is 38 octets shorter`() {
+        reassembler.feed(startAt13(64L, part1, seq = 0))
+
+        assertEquals(26, reassembler.expectedBytes)
+    }
+
+    @Test
+    fun `a last datagram that leaves the frame short keeps it open until the next start drops it`() {
+        // Not seen in the capture (every frame ends exactly in its last datagram); pinned so a change is noticed.
+        reassembler.feed(startAt13(framSizeFor(22), part1, seq = 0))
+        reassembler.feed(lastOfFrame(part2, seq = 1))
+        assertTrue(reassembler.frameInProgress, "16 of 22 octets: still open")
+
+        val frames = reassembler.feed(startAt13(framSizeFor(8), IDR_8, seq = 2))
+
+        assertBytes(IDR_8, frames.single(), "the new frame")
+        assertEquals(1, reassembler.framesDropped)
+    }
+
+    @Test
+    fun `a sized chunk that ends with the next frame's start code closes the frame before it`() {
+        // The kart's quirk on about 0.6% of frames: the frame's last sized chunk carries 00 00 01 09 past the
+        // frame's length, and the frame's last datagram then holds nothing of the frame.
+        val frames = listOf(
+            startAt13(framSizeFor(22), part1, seq = 0),
+            continuation(part2, seq = 1),
+            continuation(part3 + hexBytes("00 00 01 09"), seq = 2),
+        ).flatMap { reassembler.feed(it) }
+
+        assertBytes(frame22, frames.single(), "the start code is cut off as surplus")
+        assertEquals(4L, reassembler.bytesDropped)
+
+        assertTrue(reassembler.feed(lastOfFrame(hexBytes("01 7d 40"), seq = 3)).isEmpty())
+        assertEquals(1, reassembler.datagramsDropped, "the frame's last datagram has no frame to join")
+        assertFalse(writer.logged(Severity.Warn), "an expected orphan, not a loss")
+    }
+
+    @Test
+    fun `a FRAM whose size leaves no H264 is not a start and is dropped`() {
+        // 38 = the FRAM record (34) and the frame-end field (4): no H.264 at all.
+        val frames = reassembler.feed(startAt13(38L, IDR_8))
+
+        assertTrue(frames.isEmpty())
+        assertFalse(reassembler.frameInProgress)
+        assertEquals(1, reassembler.datagramsDropped)
     }
 
     @Test
@@ -172,7 +232,7 @@ class LspVideoReassemblerTest {
             val frames = listOf(
                 startAt13(framSizeFor(22), part1, seq = 0),
                 continuation(part2, seq = 1),
-                lastOfGroup(part3, seq = 2, padding = STALE, chunkType = chunkType),
+                lastOfFrame(part3, seq = 2, padding = STALE, chunkType = chunkType),
             ).flatMap { reassembler.feed(it) }
 
             assertBytes(frame22, frames.single(), "frame with chunk type $chunkType")
@@ -211,7 +271,7 @@ class LspVideoReassemblerTest {
         reassembler.feed(startAt13(framSizeFor(20), part1, seq = 0))
         val huge = ByteArray(1024 * 1024) { 0x66 }
 
-        val frames = reassembler.feed(lastOfGroup(huge, seq = 1))
+        val frames = reassembler.feed(lastOfFrame(huge, seq = 1))
 
         assertEquals(1, frames.size)
         assertEquals(20, frames.single().size)
@@ -260,8 +320,8 @@ class LspVideoReassemblerTest {
     @Test
     fun `a datagram with only its headers and trailer adds nothing to the frame in progress`() {
         reassembler.feed(startAt13(framSizeFor(22), part1, seq = 0))
-        val empty = lastOfGroup(ByteArray(0), seq = 1)
-        assertEquals(LspVideo.DATAGRAM_HEADER + LspVideo.PACKET_TRAILER, empty.size, "the smallest accepted datagram")
+        val empty = lastOfFrame(ByteArray(0), seq = 1)
+        assertEquals(LspVideo.DATAGRAM_HEADER + LspVideo.FRAME_END_FIELD + LspVideo.PACKET_TRAILER, empty.size)
 
         val frames = reassembler.feed(empty)
 
@@ -439,11 +499,11 @@ class LspVideoReassemblerTest {
 
     @Test
     fun `the largest accepted frame is held in a buffer of exactly its expected size`() {
-        // 2 MiB packet size -> expected = 2 MiB - 34; the first datagram only fills 8 octets of it.
+        // 2 MiB packet size -> expected = 2 MiB - 34 - 4; the first datagram only fills 8 octets of it.
         assertTrue(reassembler.feed(startAt13(2L * 1024 * 1024, IDR_8)).isEmpty())
 
         assertTrue(reassembler.frameInProgress)
-        assertEquals(2 * 1024 * 1024 - 34, reassembler.expectedBytes)
+        assertEquals(2 * 1024 * 1024 - 34 - 4, reassembler.expectedBytes)
         assertEquals(8, reassembler.bufferedBytes)
     }
 

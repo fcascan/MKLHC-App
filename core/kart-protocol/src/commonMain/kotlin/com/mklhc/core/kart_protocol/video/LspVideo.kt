@@ -19,17 +19,18 @@ package com.mklhc.core.kart_protocol.video
  *
  * A datagram that opens a video frame carries a "FRAM" record right after the header, whose chunk header reads
  * `80 1f`; a keyframe's first datagram instead has an "L2" block at octet 8, in place of the chunk header, and its
- * FRAM record at 43. The FRAM record's big-endian size field covers the 32-octet FRAM header plus two meta octets, followed by
- * the first part of the H.264 access unit. The rest follows in continuation datagrams: with chunk type
- * [CHUNK_WITH_LENGTH] (`85 72` on a full one) the chunk holds `length + 1` H.264 octets right after the header;
- * the last datagram of a group has another type (`ba 00`, `b6 00`, `be 00`) and no length, so its H.264 runs
- * from the header to the trailer, and the frame's FRAM length cuts off the stale octets the kart pads it with.
- * A keyframe spans several groups, so a group is not a frame.
+ * FRAM record at 43. The FRAM record (32-octet FRAM header plus two meta octets) is followed by the first part of
+ * the H.264 access unit. The rest follows in continuation datagrams: with chunk type [CHUNK_WITH_LENGTH] (`85 72`
+ * on a full one) the chunk holds `length + 1` H.264 octets right after the header; the frame's last datagram has
+ * another type (`ba 00`, `b6 00`, `be 00`) and no length: a [FRAME_END_FIELD]-octet field follows its header (it
+ * steps by about 4168 per frame, a timestamp of some kind), then its H.264 runs to the trailer, and the frame's
+ * length cuts off the stale octets the kart pads it with. A keyframe spans several groups, the earlier ones
+ * ending on a sized chunk, so only the frame's last datagram has that type. The FRAM size counts the record and
+ * the field, so a frame's H.264 length is `FRAM size - FRAM_SIZE_OVERHEAD - FRAME_END_FIELD`.
  *
- * Provenance of the values: the FRAM offsets, the size overhead and the trailer come from the reference; the
- * header and chunk layout were measured on 2,185 frames: 2,171 end exactly in their last datagram under this
- * layout; the 14 holding a continuation of odd length complete one datagram early and may be one octet off, an
- * open question.
+ * Provenance of the values: the FRAM offsets, the FRAM record size and the trailer come from the reference; the
+ * header, the chunk layout and the frame-end field were measured on a 2,185-frame capture (every frame ends with
+ * exactly one such datagram), and FFmpeg decodes every frame rebuilt this way without an error (2026-10-21).
  */
 object LspVideo {
     /**
@@ -39,10 +40,17 @@ object LspVideo {
     const val PACKET_TRAILER = 8
 
     /**
-     * Octets the FRAM size field counts on top of the H.264 bytes: the 32-octet FRAM header plus 2 meta
-     * octets. The H.264 length of a frame is therefore `framSize - FRAM_SIZE_OVERHEAD`.
+     * Octets of the FRAM record the FRAM size field counts: the 32-octet FRAM header plus 2 meta octets. The size
+     * also counts the [FRAME_END_FIELD], so the frame's H.264 length is `framSize - FRAM_SIZE_OVERHEAD -
+     * FRAME_END_FIELD`.
      */
     const val FRAM_SIZE_OVERHEAD = 34
+
+    /**
+     * Octets of the field right after the header of a frame's last datagram (a chunk that is not
+     * [CHUNK_WITH_LENGTH]); not H.264, but counted by the FRAM size.
+     */
+    const val FRAME_END_FIELD = 4
 
     /** Largest FRAM size accepted; a bigger value is treated as "not a FRAM header". Bounds frame memory. */
     const val MAX_FRAM_PACKET_SIZE = 2 * 1024 * 1024
