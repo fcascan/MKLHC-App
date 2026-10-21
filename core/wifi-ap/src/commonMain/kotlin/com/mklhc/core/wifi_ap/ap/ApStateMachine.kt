@@ -45,6 +45,13 @@ enum class ApState {
  * - Deauthentication / disassociation from the associated (or authenticated) station drops it and
  *   returns the machine to [ApState.Beaconing]; nothing is transmitted. The same frames from any
  *   other station are ignored.
+ * - The caller can drop the associated station on its own initiative ([dropStation], for example
+ *   after the station has been silent too long): the station is forgotten as if it had
+ *   deauthenticated, and a deauthentication is returned for the caller to transmit.
+ * - A to-DS data frame to our BSSID from a station that is not associated is answered by
+ *   [rejectUnassociatedData] with a deauthentication (reason 7), as hostapd does: the station still
+ *   believes it is associated (it missed a deauthentication, or the access point restarted) and is
+ *   told to join again.
  * - Frames not addressed to our BSSID, malformed frames, control frames, and data frames are
  *   ignored by [onFrame]; the data plane uses [decryptData] and [encryptData].
  *
@@ -115,6 +122,56 @@ class ApStateMachine(
             parsed.isDeauth || parsed.isDisassoc -> onDeparture(parsed)
             else -> emptyList()
         }
+    }
+
+    /**
+     * Drops the associated station on the caller's initiative and returns the deauthentication with
+     * [reasonCode] to transmit to it, or null when no station is associated (nothing changes then).
+     *
+     * Business logic: the access point gives up on a station it no longer hears from. The station is
+     * forgotten entirely, as when it deauthenticates: neither associated nor authenticated, and the
+     * replay window starts afresh. The deauthentication tells a station that is still around to join
+     * again. If it does not reach the station, the station still believes it is associated and keeps
+     * sending data: the caller answers that data through [rejectUnassociatedData] (reason 7), which
+     * tells it again, and the station authenticates and associates as usual.
+     */
+    fun dropStation(reasonCode: Int): ByteArray? {
+        val dropped = associatedStation ?: return null
+        dropAssociation()
+        authenticatedStation = null
+        return Ieee80211.deauthentication(
+            station = dropped,
+            bssid = bssid,
+            reasonCode = reasonCode,
+            sequenceNumber = nextSequenceNumber(),
+        )
+    }
+
+    /**
+     * Answers a data frame (null data included) from a station that is not associated with a
+     * deauthentication to it, reason 7 ("class 3 frame received from nonassociated STA"), or returns
+     * null when the frame needs no answer: it is not a to-DS data frame addressed to our BSSID (another
+     * network's traffic, or a 4-address frame), it comes from the associated station, or its sender is
+     * a group address.
+     *
+     * Business logic: a station that missed our deauthentication ([dropStation]), or that associated
+     * before the access point restarted, still believes it is associated and keeps sending data that
+     * nobody reads. Telling it, as hostapd does, makes it authenticate and associate again now instead
+     * of whenever its own logic gives up. A deauthentication ends the station's authentication too, so
+     * the machine forgets it if it had authenticated, and its next association request is refused
+     * until it authenticates again. Every qualifying frame is answered: rate limiting is the caller's.
+     */
+    fun rejectUnassociatedData(frame: Ieee80211Frame): ByteArray? {
+        if (!frame.isDataFrame || !frame.toDs || frame.fromDs || frame.addr1 != bssid) return null
+        val sender = frame.addr2
+        if (sender.isMulticast || sender == associatedStation) return null
+        if (sender == authenticatedStation) authenticatedStation = null
+        return Ieee80211.deauthentication(
+            station = sender,
+            bssid = bssid,
+            reasonCode = ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA,
+            sequenceNumber = nextSequenceNumber(),
+        )
     }
 
     /**

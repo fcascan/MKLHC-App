@@ -12,12 +12,14 @@ import com.mklhc.core.wifi_ap.mac.FrameControl
 import com.mklhc.core.wifi_ap.mac.Ieee80211Frame
 import com.mklhc.core.wifi_ap.mac.LlcSnap
 import com.mklhc.core.wifi_ap.mac.MacAddress
+import com.mklhc.core.wifi_ap.mac.ReasonCodes
 import com.mklhc.core.wifi_ap.pcap.PcapWriter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +33,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.TimeMark
+import kotlin.time.TimeSource
 
 /*
  * The access point's link layer: the netstack's FrameLink implemented over radiod's RadioLink.
@@ -56,6 +60,9 @@ import kotlin.coroutines.cancellation.CancellationException
  * @property txRate the rate string for every frame the access point transmits.
  * @property txRetryLimit the per-frame retry limit sent with TX_FRAME (radiod currently applies one device-wide limit).
  * @property readyTimeoutMs how long [RadioAccessPoint.bringUp] waits for radiod's READY after INIT.
+ * @property stationInactivityTimeoutMs how long the associated station may send nothing before the access point drops
+ *   it (see [DEFAULT_STATION_INACTIVITY_TIMEOUT_MS] for the default); 0 disables the check.
+ * @throws IllegalArgumentException if [stationInactivityTimeoutMs] is negative.
  */
 data class RadioOptions(
     val vid: Int = DEFAULT_VID,
@@ -65,7 +72,15 @@ data class RadioOptions(
     val txRate: String = DEFAULT_TX_RATE,
     val txRetryLimit: Int = DEFAULT_TX_RETRY_LIMIT,
     val readyTimeoutMs: Long = DEFAULT_READY_TIMEOUT_MS,
+    val stationInactivityTimeoutMs: Long = DEFAULT_STATION_INACTIVITY_TIMEOUT_MS,
 ) {
+    init {
+        require(stationInactivityTimeoutMs >= 0) {
+            "RadioOptions(): the station inactivity timeout cannot be negative -> " +
+                "stationInactivityTimeoutMs=$stationInactivityTimeoutMs"
+        }
+    }
+
     companion object {
         /** USB vendor id of the reference adapter (RTL8812CU). */
         const val DEFAULT_VID = 0x0BDA
@@ -79,6 +94,16 @@ data class RadioOptions(
          * transfer (~1.3 ms over WinUSB). Measured on 2026-10-20.
          */
         const val DEFAULT_READY_TIMEOUT_MS = 120_000L
+
+        /**
+         * How long the associated station may send nothing before it is dropped, by default. The kart does not use
+         * power save (its frames carry PM = 0 on hardware), so a kart that is there is never asleep. During a game
+         * session it streams telemetry and video and acknowledges the 1 s LVNI keepalive, and during pairing its
+         * longest expected silence is the ~5 s it waits after the RCD handshake for the app to connect. 20 s is well
+         * above both, so a kart that is still there is not dropped, and a wait on a kart that powered off or left
+         * range still ends after seconds instead of never.
+         */
+        const val DEFAULT_STATION_INACTIVITY_TIMEOUT_MS = 20_000L
 
         private const val DEFAULT_BANDWIDTH_MHZ = 20
         private const val DEFAULT_TX_RATE = "6M"
@@ -104,7 +129,20 @@ data class RadioOptions(
  *   (probe, authentication, association, deauthentication) are fed to the state machine and its responses are
  *   transmitted. Data frames are accepted only from the associated station (to-DS, addr1 = BSSID, addr2 = the
  *   station), CCMP-decrypted, LLC/SNAP-unwrapped and delivered on [inbound] as a [LinkPayload]. Frames of
- *   neighbouring networks are ignored.
+ *   neighbouring networks are ignored. A to-DS data frame to the BSSID from a station that is not associated (it
+ *   missed a deauthentication, or it associated before the app restarted, and still believes it is associated) is
+ *   answered with a deauthentication, reason 7, at most once a second per station, as hostapd does, so the station
+ *   joins again instead of sending into the void.
+ * - A station that sends nothing for [RadioOptions.stationInactivityTimeoutMs] is dropped; without this, a kart that
+ *   powers off or leaves range without a frame would stay associated forever. radiod reports no TX status, so the
+ *   access point cannot probe the station (as hostapd does with a null data frame): only received frames prove it is
+ *   there. Any frame from the associated station to the BSSID counts, management or data, also null data and data
+ *   frames that are unprotected or fail CCMP (they are not delivered, but the station sent them); association itself
+ *   counts too. A watchdog launched by [start] next to the collectors checks periodically and drops a station silent
+ *   for longer than the timeout: the state machine forgets it, a deauthentication (reason 4, inactivity) is
+ *   transmitted and [associatedStation] turns null, exactly as when the station deauthenticates. The network stays
+ *   served, so the station can authenticate and associate again as usual; one that missed the deauthentication is
+ *   told again by the reason-7 answer to its next data frame. While nobody is associated the watchdog sleeps.
  * - [send] wraps a payload in LLC/SNAP, encrypts it for the associated station and transmits it. The link has one
  *   station, so there is no link address: with nobody associated the frame is dropped like a lost one, and TCP
  *   retransmits.
@@ -113,7 +151,9 @@ data class RadioOptions(
  *   capture never delays, reorders or stops protocol traffic.
  *
  * Milestone log lines (the hardware GO criteria): `auth -> sta= retry= rssiDbm=`, `assoc -> sta= retry= rssiDbm=`,
- * `deauth -> sta= reason=`, `KartAssociated -> sta= aid=`, `station left -> sta=` and the first decrypted data frame
+ * `deauth -> sta= reason=`, `KartAssociated -> sta= aid=`, `station left -> sta=`,
+ * `station inactive, dropped -> sta= idleMs=`,
+ * `data from a station that is not associated, deauthenticating -> sta= reason=` and the first decrypted data frame
  * of each association. The network's CCMP key, its PSK and the pairing seed are never logged.
  *
  * Not covered: power-save buffering, per-TID replay windows and group-addressed data (there is no group key, so even
@@ -124,23 +164,30 @@ data class RadioOptions(
  * stack calls [send] from its own coroutines while the receive collector runs. One [Mutex] guards the state machine,
  * the capture and the lifecycle state; [send] holds it across encryption and TX_FRAME so packet numbers reach the
  * air in increasing order (the kart's CCMP replay window drops a lower packet number that arrives after a higher
- * one), and the receive collector holds it while handling a frame and transmitting its responses. [send] and the
- * receive path are safe from any coroutine. The lifecycle calls ([start], [bringUp], [serve], [stop]) must be made
- * one at a time by the owner, with one exception: [stop] may run while a [bringUp] is still in progress (waiting for
- * READY, typically). That bring-up then fails with an IllegalStateException and records nothing, so a later [serve]
- * fails too instead of commanding a radio that was shut down. It is a plain failure, not a CancellationException,
- * because the caller was not cancelled and must not mistake it for a silent cancellation.
+ * one), and the receive collector holds it while handling a frame and transmitting its responses. The inactivity
+ * watchdog sleeps outside it and holds it only to check the station and, when it drops one, to transmit the
+ * deauthentication, so a check holds up the frames being received for at most the check itself plus one TX_FRAME,
+ * as a management response does. [send] and the receive path are safe from any coroutine. The lifecycle calls
+ * ([start], [bringUp], [serve], [stop]) must be made one at a time by the owner, with one exception: [stop] may run
+ * while a [bringUp] is still in progress (waiting for READY, typically). That bring-up then fails with an
+ * IllegalStateException and records nothing, so a later [serve] fails too instead of commanding a radio that was shut
+ * down. It is a plain failure, not a CancellationException, because the caller was not cancelled and must not mistake
+ * it for a silent cancellation.
  *
  * @param radio the link to radiod (a [FakeRadioLink][com.mklhc.core.radio.FakeRadioLink] in tests).
  * @param options the radio tunables.
  * @param primitives the crypto provider for CCMP.
  * @param log the logger; injectable so tests can assert the milestones.
+ * @param timeSource the monotonic source the station's frames are timed against for the inactivity timeout;
+ *   [TimeSource.Monotonic] in production, the test scheduler's virtual source under `runTest` (the real monotonic clock
+ *   does not advance with virtual time).
  */
 class RadioAccessPoint(
     private val radio: RadioLink,
     private val options: RadioOptions = RadioOptions(),
     private val primitives: CryptoPrimitives = CryptoPrimitives(),
     private val log: Logger = Logger.withTag(TAG),
+    private val timeSource: TimeSource = TimeSource.Monotonic,
 ) : FrameLink {
 
     /** Guards every field marked "guarded by [lock]", the capture appends, and spans encrypt + TX_FRAME. */
@@ -156,8 +203,8 @@ class RadioAccessPoint(
     /** Never closed: it outlives stop/start and network stack restarts, as the [FrameLink] contract requires. */
     private val inboundFrames = Channel<LinkPayload>(INBOUND_CAPACITY)
 
-    /** The two radio collectors; owned by the lifecycle calls [start] and [stop]. */
-    private val collectors = ArrayList<Job>()
+    /** The two radio collectors and the inactivity watchdog; owned by the lifecycle calls [start] and [stop]. */
+    private val radioJobs = ArrayList<Job>()
 
     // Guarded by [lock].
     private var network: ServedNetwork? = null
@@ -173,7 +220,18 @@ class RadioAccessPoint(
     // Guarded by [lock]. Counts the stops; a bring-up records its channel only if no stop ran since it began.
     private var stopGeneration = 0L
 
-    /** The associated station, or null while only beaconing (and after [serve], [bringUp] or [stop] dropped it). */
+    // Guarded by [lock]. When the associated station was last heard from (its association request or its latest frame
+    // to the BSSID); null while no station is associated. Set only by noteStationHeard, cleared by publishStation.
+    private var stationHeard: TimeMark? = null
+
+    // Guarded by [lock]. The latest stations sent a reason-7 deauthentication for data while not associated, and when,
+    // oldest first; at most UNASSOCIATED_DEAUTH_SENDERS of them.
+    private val unassociatedDeauths = LinkedHashMap<MacAddress, TimeMark>()
+
+    /**
+     * The associated station, or null while only beaconing (and after [serve], [bringUp] or [stop] dropped it, or the
+     * station left or went silent for longer than [RadioOptions.stationInactivityTimeoutMs]).
+     */
     val associatedStation: StateFlow<MacAddress?> = stationState.asStateFlow()
 
     /**
@@ -206,18 +264,21 @@ class RadioAccessPoint(
     override val inbound: Flow<LinkPayload> = inboundFrames.receiveAsFlow()
 
     /**
-     * Subscribes to the radio's received frames and notifications, launching the collectors in [scope]. The
+     * Subscribes to the radio's received frames and notifications, launching the collectors in [scope], and launches
+     * the station inactivity watchdog there too (unless [RadioOptions.stationInactivityTimeoutMs] is 0). The
      * subscriptions are in place when this returns, so a following [bringUp] cannot miss radiod's answer. Give it a
-     * scope that lives as long as the access point is in use; [stop] cancels the collectors.
+     * scope that lives as long as the access point is in use; [stop] cancels the collectors and the watchdog.
      *
      * @throws IllegalStateException if already started (call [stop] first).
      */
     fun start(scope: CoroutineScope) {
-        check(collectors.isEmpty()) { "start(): already started" }
-        log.i { "start(): listening to the radio" }
+        check(radioJobs.isEmpty()) { "start(): already started" }
+        val inactivityTimeoutMs = options.stationInactivityTimeoutMs
+        log.i { "start(): listening to the radio -> stationInactivityTimeoutMs=$inactivityTimeoutMs" }
         // UNDISPATCHED runs each launch up to the collector's first suspension, which is the moment it subscribes.
-        collectors += scope.launch(start = CoroutineStart.UNDISPATCHED) { radio.events.collect { onEvent(it) } }
-        collectors += scope.launch(start = CoroutineStart.UNDISPATCHED) { radio.rxFrames.collect { onRxFrame(it) } }
+        radioJobs += scope.launch(start = CoroutineStart.UNDISPATCHED) { radio.events.collect { onEvent(it) } }
+        radioJobs += scope.launch(start = CoroutineStart.UNDISPATCHED) { radio.rxFrames.collect { onRxFrame(it) } }
+        if (inactivityTimeoutMs > 0) radioJobs += scope.launch { watchStationActivity(inactivityTimeoutMs) }
     }
 
     /**
@@ -236,7 +297,7 @@ class RadioAccessPoint(
      * @throws IllegalArgumentException if [channel] is not one of [ApConfig.ALLOWED_CHANNELS].
      */
     suspend fun bringUp(channel: Int) {
-        check(collectors.isNotEmpty()) { "bringUp(): start() must be called first, or radiod's answer is missed" }
+        check(radioJobs.isNotEmpty()) { "bringUp(): start() must be called first, or radiod's answer is missed" }
         require(channel in ApConfig.ALLOWED_CHANNELS) {
             "bringUp(): channel must be one of ${ApConfig.ALLOWED_CHANNELS} -> channel=$channel"
         }
@@ -319,15 +380,16 @@ class RadioAccessPoint(
 
     /**
      * Drops the station and forgets the network and the radio state, stops the beacon, asks radiod to shut down (it
-     * powers the chip down; a chip left running keeps beaconing) and cancels the collectors. The forgetting comes
-     * first, under the lock: from then on nothing is answered or served, and a [bringUp] still in progress fails
-     * instead of recording its channel (one waiting for READY is woken when the collectors are gone). Runs to
-     * completion even when the calling coroutine is cancelled; each radio command is best effort, so a radiod that is
-     * already gone does not stop the rest. Safe to call twice: when not started it does nothing. [inbound] stays
-     * usable for a later [start]; the payloads still queued on it are discarded.
+     * powers the chip down; a chip left running keeps beaconing) and cancels the collectors and the inactivity
+     * watchdog. The forgetting comes first, under the lock: from then on nothing is answered, served or dropped for
+     * inactivity, and a [bringUp] still in progress fails instead of recording its channel (one waiting for READY is
+     * woken when the collectors are gone). Runs to completion even when the calling coroutine is cancelled; each radio
+     * command is best effort, so a radiod that is already gone does not stop the rest. Safe to call twice: when not
+     * started it does nothing. [inbound] stays usable for a later [start]; the payloads still queued on it are
+     * discarded.
      */
     suspend fun stop(): Unit = withContext(NonCancellable) {
-        if (collectors.isEmpty()) {
+        if (radioJobs.isEmpty()) {
             log.d { "stop(): not started, nothing to stop" }
             return@withContext
         }
@@ -339,9 +401,9 @@ class RadioAccessPoint(
         }
         bestEffort("stopping the beacon") { radio.stopBeacon() }
         bestEffort("asking radiod to shut down") { radio.shutdown() }
-        collectors.forEach { it.cancel() }
-        collectors.forEach { it.join() }
-        collectors.clear()
+        radioJobs.forEach { it.cancel() }
+        radioJobs.forEach { it.join() }
+        radioJobs.clear()
         // No READY or ERROR can arrive any more: wake a bring-up still waiting, so it fails now, not at its timeout.
         outcome.value = RadioOutcome.Stopped
         log.i { "stop(): radio stopped -> droppedStation=$dropped decryptedFrames=$decrypted" }
@@ -417,6 +479,7 @@ class RadioAccessPoint(
         val machine = served.machine
         val stationBefore = machine.station
         val responses = machine.onFrame(radioFrame.frame)
+        noteStationHeard(served, parsed)
         val addressedToUs = parsed.addr1 == served.bssid || parsed.addr3 == served.bssid
         if (!addressedToUs && responses.isEmpty()) return // a neighbouring network's traffic
 
@@ -458,13 +521,28 @@ class RadioAccessPoint(
     /**
      * Decrypts a data frame from the associated station, captures its clear form and delivers its payload on
      * [inbound]. Everything else (other networks, other stations, null data, unprotected or tampered frames, bodies
-     * that are not LLC/SNAP) is dropped. Call with [lock] held.
+     * that are not LLC/SNAP) is dropped, though any frame of the station to the BSSID still counts as hearing from it
+     * for the inactivity timeout. A to-DS frame to the BSSID from a station that is not associated is answered with a
+     * deauthentication (see [unassociatedDeauthentication]): transmitted first, best effort, then captured. Call with
+     * [lock] held.
      */
-    private fun onDataFrame(radioFrame: RadioFrame, parsed: Ieee80211Frame) {
+    private suspend fun onDataFrame(radioFrame: RadioFrame, parsed: Ieee80211Frame) {
         val served = network ?: return
-        val station = served.machine.station ?: return // nobody is associated yet
-        val fromOurStation = parsed.toDs && parsed.addr1 == served.bssid && parsed.addr2 == station
-        if (!fromOurStation) return // another network's or another station's data
+        val station = served.machine.station
+        if (station == null || parsed.addr2 != station) {
+            val deauth = unassociatedDeauthentication(served, parsed) ?: return // other networks' traffic, or too soon
+            log.i {
+                "onDataFrame(): data from a station that is not associated, deauthenticating -> " +
+                    "sta=${parsed.addr2} reason=${ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA}"
+            }
+            if (transmit(deauth, FRAME_KIND_MANAGEMENT)) captureFrame(deauth)
+            return
+        }
+        // Before any filtering: null data, an unprotected frame or one CCMP rejects is not delivered, but the station
+        // sent it, so it is still there.
+        noteStationHeard(served, parsed)
+        val toOurBssid = parsed.toDs && parsed.addr1 == served.bssid
+        if (!toOurBssid) return // the station's data to another network
         if (parsed.isNullData) return // power-save signalling, no payload
         if (!parsed.isProtected) {
             log.w { "onDataFrame(): ignoring an unprotected data frame -> sta=$station" }
@@ -512,6 +590,98 @@ class RadioAccessPoint(
         } else {
             log.d { "deliver(): the inbound queue is still full, frame dropped -> dropped=$inboundDropped" }
         }
+    }
+
+    /**
+     * The deauthentication (reason 7) that answers a data frame from a station that is not associated, or null when
+     * the frame needs none (it is not a to-DS frame to the BSSID: see [ApStateMachine.rejectUnassociatedData]) or the
+     * sender was already sent one less than [UNASSOCIATED_DEAUTH_INTERVAL_MS] ago. Call with [lock] held.
+     *
+     * Business logic: a station that missed our deauthentication keeps sending at its own pace, up to hundreds of
+     * frames a second while it streams; one deauthentication a second is enough to tell it, and keeps the radio from
+     * answering every frame. The limit is checked before the state machine is asked, so a frame left unanswered
+     * neither uses a sequence number nor changes the station's state. Only the latest [UNASSOCIATED_DEAUTH_SENDERS]
+     * senders are remembered, so the table never grows with every address heard.
+     */
+    private fun unassociatedDeauthentication(served: ServedNetwork, parsed: Ieee80211Frame): ByteArray? {
+        val sender = parsed.addr2
+        val last = unassociatedDeauths[sender]
+        if (last != null && last.elapsedNow().inWholeMilliseconds < UNASSOCIATED_DEAUTH_INTERVAL_MS) return null
+        val deauth = served.machine.rejectUnassociatedData(parsed) ?: return null
+        // Re-inserted, so the table stays ordered from the oldest deauthentication to the newest.
+        unassociatedDeauths.remove(sender)
+        unassociatedDeauths[sender] = timeSource.markNow()
+        if (unassociatedDeauths.size > UNASSOCIATED_DEAUTH_SENDERS) {
+            unassociatedDeauths.remove(unassociatedDeauths.keys.first())
+        }
+        return deauth
+    }
+
+    // ---- station inactivity -------------------------------------------------------------------
+
+    /**
+     * Records that the associated station was heard when [parsed] comes from it (addr2) and is addressed to the BSSID
+     * (addr1); frames of other stations or other networks prove nothing. This is the only place the station's clock
+     * is started: call it with [lock] held and, for a management frame, after the state machine has seen it, so the
+     * association request that makes the station associated already counts (before it, nobody is associated).
+     */
+    private fun noteStationHeard(served: ServedNetwork, parsed: Ieee80211Frame) {
+        val station = served.machine.station ?: return
+        if (parsed.addr1 == served.bssid && parsed.addr2 == station) stationHeard = timeSource.markNow()
+    }
+
+    /**
+     * The inactivity watchdog: while a station is associated, wakes every check period and drops it once it has been
+     * silent for longer than [timeoutMs]; while nobody is associated, sleeps until a station associates. Runs until
+     * [stop] cancels it.
+     *
+     * Business logic: the period is a quarter of the timeout, at most [MAX_INACTIVITY_CHECK_PERIOD_MS], so a silent
+     * station is dropped within one period after its timeout ran out. With nobody associated nothing can go silent,
+     * so the watchdog waits for the next association instead of waking every second for the hours the access point
+     * may only beacon. The sleep is outside the lock; a check holds it to read the station's clock and, when it drops
+     * the station, for the one TX_FRAME of the deauthentication, as a management response does, so a frame being
+     * received waits for at most that. Each check reads the served network under the lock, so it only ever drops the
+     * station of the network served at that moment: once [stop], [serve] or [bringUp] has dropped the network, its
+     * station is out of reach. A check that fails is logged and the watchdog carries on, as the receive collector
+     * does after a frame that failed.
+     */
+    private suspend fun watchStationActivity(timeoutMs: Long) {
+        val periodMs = (timeoutMs / INACTIVITY_CHECKS_PER_TIMEOUT).coerceIn(1L, MAX_INACTIVITY_CHECK_PERIOD_MS)
+        while (true) {
+            stationState.first { it != null } // returns at once while one is associated
+            delay(periodMs)
+            try {
+                lock.withLock {
+                    val dropped = dropSilentStation(timeoutMs) ?: return@withLock
+                    log.i {
+                        "watchStationActivity(): station inactive, dropped -> sta=${dropped.station} idleMs=${dropped.idleMs}"
+                    }
+                    // Best effort: the station is dropped whether or not the deauthentication reaches it.
+                    val deauth = dropped.deauthentication
+                    if (transmit(deauth, FRAME_KIND_MANAGEMENT)) captureFrame(deauth)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                log.e(failure) { "watchStationActivity(): check failed -> message=${failure.message}" }
+            }
+        }
+    }
+
+    /**
+     * Drops the associated station when it has been silent for longer than [timeoutMs]: the state machine forgets it
+     * and "no station" is published as for a departure. Returns the station dropped, how long it was silent and the
+     * deauthentication to transmit to it, or null when there is nothing to drop. The network stays served and the
+     * queued payloads are kept, as when the station deauthenticates. Call with [lock] held.
+     */
+    private fun dropSilentStation(timeoutMs: Long): InactivityDrop? {
+        val served = network ?: return null
+        val station = served.machine.station ?: return null
+        val idleMs = stationHeard?.elapsedNow()?.inWholeMilliseconds ?: return null
+        if (idleMs <= timeoutMs) return null
+        val deauthentication = served.machine.dropStation(ReasonCodes.DISASSOC_INACTIVITY) ?: return null
+        publishStation(null)
+        return InactivityDrop(station, idleMs, deauthentication)
     }
 
     // ---- transmit and capture -----------------------------------------------------------------
@@ -594,10 +764,17 @@ class RadioAccessPoint(
         return dropped
     }
 
-    /** Publishes [station] on [associatedStation] and [isStationAssociated] in one step. Call with [lock] held. */
+    /**
+     * Publishes [station] on [associatedStation] and [isStationAssociated] in one step. When nobody is associated any
+     * more it also clears the inactivity clock; it never starts it: [noteStationHeard] does, already for the
+     * association request that makes a station associated. A station can only replace another by way of null (the
+     * state machine answers a second station with "AP full"), so the clear also covers a change of station. Call with
+     * [lock] held.
+     */
     private fun publishStation(station: MacAddress?) {
         stationState.value = station
         stationAssociated.value = station != null
+        if (station == null) stationHeard = null
     }
 
     /**
@@ -619,6 +796,9 @@ class RadioAccessPoint(
     private class ServedNetwork(val config: ApConfig, val machine: ApStateMachine) {
         val bssid: MacAddress get() = config.bssid
     }
+
+    /** A station the inactivity watchdog dropped: who, how long it had been silent, and the deauthentication for it. */
+    private class InactivityDrop(val station: MacAddress, val idleMs: Long, val deauthentication: ByteArray)
 
     /** The state of the bring-up as radiod reports it, or [Stopped] once [stop] has cancelled the collectors. */
     private sealed interface RadioOutcome {
@@ -650,5 +830,22 @@ class RadioAccessPoint(
 
         /** The Protected Frame bit of the 16-bit Frame Control field. */
         private const val PROTECTED_FRAME_BIT = 0x4000
+
+        /** The inactivity watchdog checks the station this many times per timeout... */
+        private const val INACTIVITY_CHECKS_PER_TIMEOUT = 4L
+
+        /** ...and at least once a second, so a silent station is dropped at most a second after its timeout. */
+        private const val MAX_INACTIVITY_CHECK_PERIOD_MS = 1_000L
+
+        /** A station that sends data while not associated is sent at most one deauthentication this often. */
+        private const val UNASSOCIATED_DEAUTH_INTERVAL_MS = 1_000L
+
+        /**
+         * How many such stations the rate limit remembers. The network admits one station, so in practice only the
+         * kart is told (after an inactivity drop or an app restart); a few entries also cover a second device that
+         * believes it is associated, and the table stays this small whatever addresses are heard. A sender pushed out
+         * by newer ones only gets one deauthentication more, which is harmless.
+         */
+        private const val UNASSOCIATED_DEAUTH_SENDERS = 4
     }
 }

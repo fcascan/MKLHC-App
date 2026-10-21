@@ -28,10 +28,14 @@ import com.mklhc.core.wifi_ap.mac.Ieee80211Frame
 import com.mklhc.core.wifi_ap.mac.InformationElements
 import com.mklhc.core.wifi_ap.mac.LlcSnap
 import com.mklhc.core.wifi_ap.mac.MacAddress
+import com.mklhc.core.wifi_ap.mac.ReasonCodes
 import com.mklhc.core.wifi_ap.pcap.PcapSink
 import com.mklhc.core.wifi_ap.pcap.PcapWriter
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -53,10 +57,11 @@ import kotlin.time.Duration.Companion.seconds
 /**
  * [RadioAccessPoint] against [FakeRadioLink], with a [FakeStation] playing the kart: the bring-up and network
  * lifecycle, the management exchange, the decrypted data path into [RadioAccessPoint.inbound], the encrypted path out
- * of [RadioAccessPoint.send], the capture and the shutdown. The last test joins the access point to a real
- * [NetstackNode] and walks the kart from association to an accepted TCP connection on the RCD port. Everything is
- * deterministic: a fixed network, an injected pcap clock, a seeded TCP initial sequence number and the virtual time of
- * `runTest`.
+ * of [RadioAccessPoint.send], the capture, the station inactivity timeout, the deauthentication of a station that sends
+ * data while not associated and the shutdown. The last test joins the access point to a real [NetstackNode] and walks
+ * the kart from association to an accepted TCP connection on the RCD port. Everything is deterministic: a fixed
+ * network, an injected pcap clock, a seeded TCP initial sequence number and the virtual time of `runTest`, which also
+ * times the station (the scheduler's time source is injected).
  */
 @OptIn(ExperimentalCoroutinesApi::class) // runCurrent / advanceTimeBy drive the collectors under virtual time
 class RadioAccessPointTest {
@@ -339,14 +344,18 @@ class RadioAccessPointTest {
         rig.receive(notToDsData(key, LlcSnap.wrap(EtherType.ARP, ByteArray(ArpPacket.WIRE_SIZE)), pn = 3, rig.primitives))
 
         assertTrue(received.isEmpty(), "nothing reaches the network stack")
-        assertEquals(0, rig.capturedFrames().size, "nothing is captured")
+        // The other station is not associated, so it is told so; none of the frames themselves is captured.
+        val captured = assertNotNull(Ieee80211Frame.parse(rig.capturedFrames().single()))
+        assertTrue(captured.isDeauth)
+        assertEquals(otherStation.mac, captured.addr1)
+        assertEquals(ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA, captured.reasonCode())
         assertEquals(STATION, rig.ap.associatedStation.value, "the association is untouched")
 
         // The associated station's own frame, under the same key, gets through: the frames above were kept out by
         // their addressing alone.
         rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 4))
         assertEquals(1, received.size)
-        assertEquals(1, rig.capturedFrames().size)
+        assertEquals(2, rig.capturedFrames().size)
     }
 
     // ---- Received data ------------------------------------------------------------------------
@@ -371,7 +380,7 @@ class RadioAccessPointTest {
     }
 
     @Test
-    fun aDataFrameBeforeAssociationIsIgnored() = runTest {
+    fun aDataFrameBeforeAssociationIsNotDeliveredButAnsweredWithADeauthentication() = runTest {
         val rig = Rig(this)
         rig.bringUpAndServe()
         rig.startCapture()
@@ -380,8 +389,9 @@ class RadioAccessPointTest {
         rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 1))
 
         assertTrue(received.isEmpty())
-        assertTrue(rig.radio.sentOfType<RadioMessage.TxFrame>().isEmpty())
-        assertEquals(0, rig.capturedFrames().size)
+        val sent = rig.radio.sentOfType<RadioMessage.TxFrame>().single().frame
+        assertEquals(ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA, rig.deauthsSent().single().reasonCode())
+        assertContentEquals(sent, rig.capturedFrames().single(), "only the deauthentication is captured, not the data")
     }
 
     @Test
@@ -697,6 +707,380 @@ class RadioAccessPointTest {
         assertEquals(1, received.size, "the inbound flow collected before the stop still delivers")
     }
 
+    // ---- Station inactivity -------------------------------------------------------------------
+
+    @Test
+    fun aSilentStationIsDroppedAfterTheInactivityTimeoutWhileTheNetworkStaysServed() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate() // at 0 s: the association starts the clock
+        rig.startCapture()
+        val received = rig.collectInbound()
+        rig.radio.clearSentMessages()
+
+        rig.passTime(INACTIVITY_TIMEOUT_MS - INACTIVITY_CHECK_MS)
+        assertEquals(STATION, rig.ap.associatedStation.value, "not dropped before the timeout")
+        assertTrue(rig.radio.sentMessages.isEmpty())
+
+        rig.passTime(2 * INACTIVITY_CHECK_MS)
+
+        assertNull(rig.ap.associatedStation.value)
+        assertFalse(rig.ap.isStationAssociated.value)
+        val sent = rig.radio.sentOfType<RadioMessage.TxFrame>().single().frame
+        val deauth = assertNotNull(Ieee80211Frame.parse(sent))
+        assertTrue(deauth.isDeauth)
+        assertEquals(STATION, deauth.addr1)
+        assertEquals(BSSID, deauth.addr2)
+        assertEquals(BSSID, deauth.addr3)
+        assertEquals(ReasonCodes.DISASSOC_INACTIVITY, deauth.reasonCode())
+        assertEquals(listOf("TxFrame"), rig.radio.sentMessages.map { it::class.simpleName }, "the beacon keeps running")
+        assertContentEquals(sent, rig.capturedFrames().single(), "the deauthentication is captured after it was sent")
+        val idleMs = INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS
+        val dropLine = "INFO: watchStationActivity(): station inactive, dropped -> sta=$STATION idleMs=$idleMs"
+        assertTrue(rig.logs.has(dropLine), rig.logs.text())
+        assertFalse(rig.ccmpKeyHex in rig.logs.text().lowercase(), "the CCMP key must never be logged")
+
+        // The station is unknown now: its data is not accepted until it joins again.
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 1))
+        assertTrue(received.isEmpty())
+    }
+
+    @Test
+    fun everyFrameTheStationSendsToTheBssidKeepsItAssociated() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        val failsCcmp = rig.station.dhcpFrame(rig.station.discover(), pn = 1)
+        failsCcmp[failsCcmp.size - 1] = (failsCcmp[failsCcmp.size - 1].toInt() xor 0x01).toByte()
+        // The gap is shorter than the timeout but two gaps are longer, so each frame must count on its own.
+        val frames = listOf(
+            "a null data frame" to nullData(from = STATION, bssid = BSSID),
+            "a frame that fails CCMP" to failsCcmp,
+            "an unprotected data frame" to unprotectedData(),
+            "a regular data frame" to rig.station.dhcpFrame(rig.station.discover(), pn = 2),
+            "a management frame" to actionFrame(from = STATION, bssid = BSSID),
+        )
+
+        var previous = "the association"
+        for ((what, frame) in frames) {
+            rig.passTime(QUIET_GAP_MS)
+            assertEquals(STATION, rig.ap.associatedStation.value, "still associated ${QUIET_GAP_MS}ms after $previous")
+            rig.receive(frame)
+            previous = what
+        }
+        rig.passTime(QUIET_GAP_MS)
+        assertEquals(STATION, rig.ap.associatedStation.value, "still associated ${QUIET_GAP_MS}ms after $previous")
+        assertTrue(rig.deauthsSent().isEmpty())
+        assertFalse(rig.logs.has("station inactive"), rig.logs.text())
+
+        // Once the frames stop, the timeout counts from the last one.
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS - QUIET_GAP_MS)
+        assertNull(rig.ap.associatedStation.value)
+        val idleMs = INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS
+        assertTrue(rig.logs.has("station inactive, dropped -> sta=$STATION idleMs=$idleMs"), rig.logs.text())
+    }
+
+    @Test
+    fun framesFromAnotherStationOrToAnotherBssidDoNotKeepTheStationAssociated() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        val key = rig.config.network.ccmpKey
+        val otherStation = FakeStation(key, BSSID, OTHER_STATION, rig.primitives)
+        val toAnotherBssid = FakeStation(key, OTHER_BSSID, STATION, rig.primitives)
+        val frames = listOf(
+            otherStation.dhcpFrame(otherStation.discover(), pn = 1),
+            toAnotherBssid.dhcpFrame(toAnotherBssid.discover(), pn = 1),
+            nullData(from = OTHER_STATION, bssid = BSSID),
+            nullData(from = STATION, bssid = OTHER_BSSID),
+            actionFrame(from = OTHER_STATION, bssid = BSSID),
+            actionFrame(from = STATION, bssid = OTHER_BSSID),
+        )
+
+        // One of them every 3 s, well past the timeout.
+        repeat(2 * frames.size) { index ->
+            rig.passTime(OTHER_TRAFFIC_GAP_MS)
+            rig.receive(frames[index % frames.size])
+        }
+
+        assertNull(rig.ap.associatedStation.value)
+        val idleMs = INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS
+        assertTrue(rig.logs.has("station inactive, dropped -> sta=$STATION idleMs=$idleMs"), rig.logs.text())
+        assertEquals(listOf(STATION), rig.deauthsSent(ReasonCodes.DISASSOC_INACTIVITY).map { it.addr1 })
+        // The other station's data to the BSSID is answered as from a station that is not associated, nothing else.
+        val toldNotAssociated = rig.deauthsSent(ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA).map { it.addr1 }
+        assertEquals(setOf(OTHER_STATION), toldNotAssociated.toSet())
+    }
+
+    @Test
+    fun aDroppedStationJoinsAgainAsUsualAndItsTimerStartsAfresh() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        val received = rig.collectInbound()
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 1))
+        assertEquals(1, received.size)
+
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS)
+        assertNull(rig.ap.associatedStation.value)
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 2))
+        assertEquals(1, received.size, "the dropped station's data is not accepted")
+
+        rig.associate()
+        assertEquals(2, rig.logs.count("KartAssociated -> sta=$STATION aid=1"))
+        rig.passTime(INACTIVITY_TIMEOUT_MS - INACTIVITY_CHECK_MS)
+        assertEquals(STATION, rig.ap.associatedStation.value, "the timer restarted at the new association")
+        // The new association starts a fresh replay window: the station numbers its frames from 1 again.
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 1))
+        assertEquals(2, received.size)
+
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS)
+        assertNull(rig.ap.associatedStation.value)
+        // Dropped twice; the data it sent in between, while dropped, was answered as from a station not associated.
+        assertEquals(
+            listOf(ReasonCodes.DISASSOC_INACTIVITY, ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA, ReasonCodes.DISASSOC_INACTIVITY),
+            rig.deauthsSent().map { it.reasonCode() },
+        )
+        assertEquals(2, rig.logs.count("station inactive, dropped -> sta=$STATION"))
+    }
+
+    @Test
+    fun aZeroTimeoutDisablesTheInactivityCheck() = runTest {
+        val rig = Rig(this, options = RadioOptions(stationInactivityTimeoutMs = 0L))
+        rig.bringUpAndServe()
+        rig.associate()
+        rig.radio.clearSentMessages()
+
+        rig.passTime(LONG_SILENCE_MS)
+
+        assertEquals(STATION, rig.ap.associatedStation.value)
+        assertTrue(rig.radio.sentMessages.isEmpty())
+        assertFalse(rig.logs.has("station inactive"), rig.logs.text())
+        assertTrue(rig.logs.has("start(): listening to the radio -> stationInactivityTimeoutMs=0"), rig.logs.text())
+    }
+
+    @Test
+    fun theInactivityTimeoutIsTwentySecondsByDefault() {
+        assertEquals(20_000L, RadioOptions().stationInactivityTimeoutMs)
+    }
+
+    @Test
+    fun aNegativeInactivityTimeoutIsRefused() {
+        val refused = assertFailsWith<IllegalArgumentException> { RadioOptions(stationInactivityTimeoutMs = -1L) }
+        assertTrue("stationInactivityTimeoutMs=-1" in refused.message.orEmpty(), refused.message)
+    }
+
+    @Test
+    fun stopEndsTheInactivityWatchdogAndNothingIsDroppedAfterIt() = runTest {
+        val rig = Rig(this, autoStart = false)
+        val accessPointJob = Job(backgroundScope.coroutineContext.job)
+        rig.ap.start(CoroutineScope(backgroundScope.coroutineContext + accessPointJob))
+        rig.bringUpAndServe()
+        rig.associate()
+        rig.passTime(INACTIVITY_TIMEOUT_MS - INACTIVITY_CHECK_MS) // one check away from the drop
+
+        rig.ap.stop()
+        rig.radio.clearSentMessages()
+
+        assertTrue(accessPointJob.children.none(), "stop() cancelled and joined the collectors and the watchdog")
+        rig.passTime(2 * INACTIVITY_TIMEOUT_MS)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "nothing is transmitted after stop")
+        assertFalse(rig.logs.has("station inactive"), rig.logs.text())
+
+        // A new start launches a new watchdog.
+        rig.ap.start(backgroundScope)
+        rig.bringUpAndServe()
+        rig.associate()
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS)
+        assertNull(rig.ap.associatedStation.value)
+        assertEquals(1, rig.deauthsSent().size)
+    }
+
+    @Test
+    fun servingAnotherNetworkDropsTheStationOnceAndTheNewAssociationGetsAFreshTimer() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        rig.passTime(QUIET_GAP_MS)
+
+        val gameSsid = "mklhc_GAME"
+        rig.ap.serve(ApConfig(bssid = BSSID, ssid = gameSsid, channel = CHANNEL, network = ApTestFixtures.network()))
+        rig.radio.clearSentMessages()
+        assertTrue(rig.logs.has("serve(): network switched, station dropped -> sta=$STATION"), rig.logs.text())
+
+        // Past the moment the old association would have timed out: serving the new network already dropped it, once.
+        rig.passTime(INACTIVITY_TIMEOUT_MS)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "no deauthentication for the station serve() already dropped")
+        assertFalse(rig.logs.has("station inactive"), rig.logs.text())
+
+        rig.receive(rig.station.authRequest())
+        rig.receive(rig.station.assocRequest(gameSsid))
+        assertEquals(STATION, rig.ap.associatedStation.value)
+        rig.passTime(INACTIVITY_TIMEOUT_MS - INACTIVITY_CHECK_MS)
+        assertEquals(STATION, rig.ap.associatedStation.value, "the timer started at the association on the new network")
+        rig.passTime(2 * INACTIVITY_CHECK_MS)
+        assertNull(rig.ap.associatedStation.value)
+        assertEquals(1, rig.deauthsSent().size)
+    }
+
+    @Test
+    fun watchdogChecksThatDropNothingDoNotHoldUpTheFramesBeingReceived() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        val received = rig.collectInbound()
+
+        // Across several checks of the watchdog, each frame is handled the moment it arrives: no virtual time passes
+        // between receiving it and delivering its payload.
+        for (pn in 1L..FRAMES_ACROSS_CHECKS) {
+            advanceTimeBy(INACTIVITY_CHECK_MS / 4)
+            rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn))
+            assertEquals(pn.toInt(), received.size, "frame $pn was handled at once")
+        }
+        assertEquals(STATION, rig.ap.associatedStation.value)
+    }
+
+    @Test
+    fun aDropWhoseDeauthenticationRadiodRefusesStillDropsAndPublishesTheStation() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        rig.startCapture()
+        rig.radio.failure = IllegalStateException("radiod is not connected")
+
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS)
+
+        assertNull(rig.ap.associatedStation.value)
+        assertFalse(rig.ap.isStationAssociated.value)
+        assertTrue(rig.logs.has("INFO: watchStationActivity(): station inactive, dropped -> sta=$STATION"), rig.logs.text())
+        assertTrue(
+            rig.logs.has("WARN: transmit(): radiod did not take the frame, treating it as lost -> kind=management"),
+            rig.logs.text(),
+        )
+        assertEquals(0, rig.capturedFrames().size, "a deauthentication that never went out is not captured")
+        assertFalse(rig.logs.has("check failed"), "a refused transmission is a lost frame, not a failed check")
+    }
+
+    @Test
+    fun payloadsQueuedBeforeAnInactivityDropAreKept() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 1)) // nobody reads inbound yet
+
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS)
+
+        assertNull(rig.ap.associatedStation.value)
+        assertEquals(1, rig.takeQueuedInbound().size, "the network stays served, so its payloads stay, as on a departure")
+    }
+
+    @Test
+    fun aFailingInactivityCheckIsLoggedAndTheWatchdogKeepsRunning() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        // The check's own log line throws, as a broken log sink would: the failure comes after the drop, before the
+        // deauthentication is transmitted.
+        rig.logs.failOnce = "station inactive"
+
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS)
+
+        assertTrue(rig.logs.has("ERROR: watchStationActivity(): check failed -> message=$LOG_SINK_FAILURE"), rig.logs.text())
+        assertNull(rig.ap.associatedStation.value)
+        assertTrue(rig.deauthsSent().isEmpty())
+
+        // The watchdog is still there: the next association that goes silent is dropped as usual.
+        rig.associate()
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS)
+        assertNull(rig.ap.associatedStation.value)
+        assertTrue(rig.logs.has("station inactive, dropped -> sta=$STATION"), rig.logs.text())
+        assertEquals(1, rig.deauthsSent(ReasonCodes.DISASSOC_INACTIVITY).size)
+    }
+
+    // ---- Data from a station that is not associated -------------------------------------------
+
+    @Test
+    fun aDroppedStationThatKeepsSendingDataIsDeauthenticatedAtMostOncePerSecondThenJoinsAgain() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        val received = rig.collectInbound()
+        rig.passTime(INACTIVITY_TIMEOUT_MS + INACTIVITY_CHECK_MS) // dropped, and the kart missed the deauthentication
+        assertNull(rig.ap.associatedStation.value)
+        rig.startCapture()
+        rig.radio.clearSentMessages()
+
+        // It still believes it is associated and keeps sending: answered once, then not again within the second.
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 1))
+        rig.passTime(DEAUTH_INTERVAL_MS / 2)
+        rig.receive(nullData(from = STATION, bssid = BSSID))
+        rig.passTime(DEAUTH_INTERVAL_MS / 2 - 1)
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 2))
+
+        val sent = rig.radio.sentOfType<RadioMessage.TxFrame>().single().frame
+        val deauth = assertNotNull(Ieee80211Frame.parse(sent))
+        assertTrue(deauth.isDeauth)
+        assertEquals(STATION, deauth.addr1)
+        assertEquals(BSSID, deauth.addr2)
+        assertEquals(BSSID, deauth.addr3)
+        assertEquals(ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA, deauth.reasonCode())
+        assertContentEquals(sent, rig.capturedFrames().single(), "the deauthentication is captured after it was sent")
+        val line = "INFO: onDataFrame(): data from a station that is not associated, deauthenticating -> sta=$STATION reason=7"
+        assertEquals(1, rig.logs.count(line), rig.logs.text())
+
+        // A second after the first, it is told again.
+        rig.passTime(1)
+        rig.receive(nullData(from = STATION, bssid = BSSID))
+        assertEquals(2, rig.deauthsSent(ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA).size)
+        assertEquals(2, rig.logs.count(line))
+        assertTrue(received.isEmpty(), "none of its data reaches the network stack")
+
+        // Told, it joins again as usual and its data flows, with no more deauthentications.
+        rig.associate()
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 1))
+        assertEquals(1, received.size)
+        assertEquals(2, rig.deauthsSent().size)
+        assertFalse(rig.ccmpKeyHex in rig.logs.text().lowercase(), "the CCMP key must never be logged")
+    }
+
+    @Test
+    fun framesOfNeighbouringNetworksAndToAnotherBssidGetNoDeauthentication() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        val key = rig.config.network.ccmpKey
+        val toAnotherBssid = FakeStation(key, OTHER_BSSID, STATION, rig.primitives)
+
+        // Nobody is associated, so none of these senders is; still, none of these is a to-DS frame to our BSSID.
+        rig.receive(toAnotherBssid.dhcpFrame(toAnotherBssid.discover(), pn = 1))
+        rig.receive(nullData(from = STATION, bssid = OTHER_BSSID))
+        rig.receive(Ieee80211.fromDsData(STATION, OTHER_BSSID, OTHER_BSSID, ByteArray(8))) // a neighbour AP to its station
+        rig.receive(notToDsData(key, LlcSnap.wrap(EtherType.ARP, ByteArray(ArpPacket.WIRE_SIZE)), pn = 2, rig.primitives))
+
+        assertTrue(rig.radio.sentOfType<RadioMessage.TxFrame>().isEmpty())
+        assertFalse(rig.logs.has("deauthenticating"), rig.logs.text())
+    }
+
+    @Test
+    fun theAssociatedStationsDataNeverGetsADeauthentication() = runTest {
+        val rig = Rig(this)
+        rig.bringUpAndServe()
+        rig.associate()
+        val received = rig.collectInbound()
+        val failsCcmp = rig.station.dhcpFrame(rig.station.discover(), pn = 1)
+        failsCcmp[failsCcmp.size - 1] = (failsCcmp[failsCcmp.size - 1].toInt() xor 0x01).toByte()
+
+        rig.receive(rig.station.dhcpFrame(rig.station.discover(), pn = 2))
+        rig.receive(nullData(from = STATION, bssid = BSSID))
+        rig.receive(unprotectedData())
+        rig.receive(failsCcmp)
+        rig.receive(nullData(from = STATION, bssid = OTHER_BSSID))
+
+        assertEquals(1, received.size)
+        assertTrue(rig.deauthsSent().isEmpty())
+        assertFalse(rig.logs.has("deauthenticating"), rig.logs.text())
+        assertEquals(STATION, rig.ap.associatedStation.value)
+    }
+
     // ---- End to end: the real network stack over the access point -----------------------------
 
     @Test
@@ -793,6 +1177,27 @@ class RadioAccessPointTest {
         return Ccmp(primitives).encrypt(key, header, body, packetNumber)
     }
 
+    /** A null data frame (no body) from [from] to [bssid]: a station saying it is there without sending anything. */
+    private fun nullData(from: MacAddress, bssid: MacAddress): ByteArray = Ieee80211Frame(
+        frameControl = FrameControl.of(Ieee80211.TYPE_DATA, Ieee80211.SUBTYPE_NULL, toDs = true),
+        addr1 = bssid,
+        addr2 = from,
+        addr3 = bssid,
+    ).toBytes()
+
+    /** A to-DS data frame from [STATION] to the BSSID that is not protected: dropped, but sent by the station. */
+    private fun unprotectedData(): ByteArray = Ieee80211Frame(
+        frameControl = FrameControl.of(Ieee80211.TYPE_DATA, Ieee80211.SUBTYPE_DATA, toDs = true),
+        addr1 = BSSID,
+        addr2 = STATION,
+        addr3 = MacAddress.BROADCAST,
+        body = LlcSnap.wrap(EtherType.ARP, ByteArray(ArpPacket.WIRE_SIZE)),
+    ).toBytes()
+
+    /** An action frame from [from] to [bssid]: a management frame the access point neither answers nor acts on. */
+    private fun actionFrame(from: MacAddress, bssid: MacAddress): ByteArray =
+        Ieee80211.managementFrame(SUBTYPE_ACTION, bssid, from, bssid, byteArrayOf(ACTION_CATEGORY_VENDOR, 0, 0, 0))
+
     /**
      * A radio whose SHUTDOWN crosses a READY still in flight: radiod answers the INIT just as the app shuts it down,
      * and the collectors, still running, take the READY before stop() cancels them.
@@ -837,22 +1242,34 @@ class RadioAccessPointTest {
         }
     }
 
-    /** Records every Kermit log line as `SEVERITY: message`. */
+    /**
+     * Records every Kermit log line as `SEVERITY: message`. Set [failOnce] to make the next line containing it throw
+     * instead of being recorded, like a broken log sink.
+     */
     private class LogCapture : LogWriter() {
         private val lines = mutableListOf<String>()
+        var failOnce: String? = null
 
         override fun log(severity: Severity, message: String, tag: String, throwable: Throwable?) {
+            val failing = failOnce
+            if (failing != null && failing in message) {
+                failOnce = null
+                throw IllegalStateException(LOG_SINK_FAILURE)
+            }
             lines += "${severity.name.uppercase()}: $message"
         }
 
         fun has(fragment: String): Boolean = lines.any { fragment in it }
+
+        fun count(fragment: String): Int = lines.count { fragment in it }
 
         fun text(): String = lines.joinToString("\n")
     }
 
     /**
      * Everything one test needs: a fixed network, the access point wired to a [FakeRadioLink] (optionally behind a
-     * wrapper), an in-memory pcap with an injected clock, and a [FakeStation] that builds the frames the kart sends.
+     * wrapper) and timing the station on the test's virtual clock, an in-memory pcap with an injected clock, and a
+     * [FakeStation] that builds the frames the kart sends.
      */
     private class Rig(
         private val test: TestScope,
@@ -870,6 +1287,7 @@ class RadioAccessPointTest {
             options = options,
             primitives = primitives,
             log = Logger(StaticConfig(minSeverity = Severity.Verbose, logWriterList = listOf(logs)), tag = "RadioAccessPointTest"),
+            timeSource = test.testScheduler.timeSource,
         )
         val station = FakeStation(config.network.ccmpKey, BSSID, STATION, primitives)
         private var clockMicros = 1_700_000_000_000_000L
@@ -933,6 +1351,17 @@ class RadioAccessPointTest {
             return taken
         }
 
+        /** Lets [millis] of virtual time pass, running everything due by then (the inactivity watchdog's checks). */
+        fun passTime(millis: Long) {
+            test.advanceTimeBy(millis)
+            test.runCurrent()
+        }
+
+        /** The deauthentications the access point has transmitted so far; only those with [reason] when it is given. */
+        fun deauthsSent(reason: Int? = null): List<Ieee80211Frame> = radio.sentOfType<RadioMessage.TxFrame>()
+            .mapNotNull { Ieee80211Frame.parse(it.frame) }
+            .filter { it.isDeauth && (reason == null || it.reasonCode() == reason) }
+
         /** Plays radiod delivering [frame] and lets the access point (and anything on the test scheduler) react. */
         fun receive(frame: ByteArray) {
             radio.emitRxFrame(RadioFrame(rssiDbm = RSSI_DBM, rate = 0, tsf = 0uL, frame = frame))
@@ -978,5 +1407,24 @@ class RadioAccessPointTest {
         const val MAC_HEADER_BYTES = 24
         const val CCMP_HEADER_BYTES = 8
         const val PN_BYTES = 6
+
+        val OTHER_STATION: MacAddress = MacAddress.parse("02:aa:bb:cc:dd:02")
+        val OTHER_BSSID: MacAddress = MacAddress.parse("02:99:99:99:99:99")
+        const val INACTIVITY_TIMEOUT_MS = RadioOptions.DEFAULT_STATION_INACTIVITY_TIMEOUT_MS
+
+        // The watchdog checks a quarter of the timeout apart, at most a second: a second at the default timeout.
+        const val INACTIVITY_CHECK_MS = 1_000L
+
+        // Shorter than the timeout, but two of them are longer than the timeout plus a check.
+        const val QUIET_GAP_MS = 15_000L
+        const val OTHER_TRAFFIC_GAP_MS = 3_000L
+        const val LONG_SILENCE_MS = 10 * 60_000L
+        const val FRAMES_ACROSS_CHECKS = 12L
+        const val SUBTYPE_ACTION = 13
+        const val ACTION_CATEGORY_VENDOR: Byte = 127
+
+        // A station that sends data while not associated gets at most one deauthentication a second.
+        const val DEAUTH_INTERVAL_MS = 1_000L
+        const val LOG_SINK_FAILURE = "the log sink failed"
     }
 }

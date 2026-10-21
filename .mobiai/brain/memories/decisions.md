@@ -346,3 +346,28 @@ The link layer the network stack runs on is `RadioAccessPoint` in :core:wifi-ap:
 - core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/RadioKartRadioAp.kt
 - app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeSession.kt
+
+## Station inactivity timeout in the access point
+
+- id: station-inactivity-timeout-in-the-access-point-20261021-012437
+- type: architecture_decision
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-21
+
+### Decision
+`RadioAccessPoint` drops an associated station it has not heard from for `RadioOptions.stationInactivityTimeoutMs` (default 20 000 ms, 0 disables): `ApStateMachine.dropStation` forgets it and returns a reason-4 deauthentication (inactivity), which is transmitted best effort, and the station is published as gone exactly like a departure (the network stays served, the inbound queue and the lease are left as for a deauthentication). The orchestrator's departure watch and the spike's lease watcher react to it. And, like hostapd, any to-DS data sent to our BSSID by a station that is not associated is answered with a reason-7 deauthentication (class 3 frame from a non-associated station), at most once per second per sender, so a kart that missed the reason-4 frame, or that still believes it is associated after the app restarted, rejoins instead of being ignored.
+
+### Why these values
+radiod reports no TX status, so the access point cannot probe a station (hostapd's null-data poll): only received frames prove the kart is there, and any frame from it to the BSSID counts (management, data, null data, unprotected or CCMP-failing). 20 s: the kart does not use power save (PM = 0 on hardware); in a game it streams telemetry and video and ACKs the 1 s LVNI keepalive, and any open TCP connection forces a frame at least every ~11 s; during pairing the longest expected silence is the ~5 s wait after the RCD handshake. TCP (RTO ~6 s, keepalive ~14 s) usually ends a game session first; the timeout matters before TCP exists (a pairing attempt waiting in accept, a kart that associated and vanished).
+
+### Implementation notes
+- Activity marks come from an injected `kotlin.time.TimeSource` (tests pass the scheduler's), recorded only by `noteStationHeard` (after the state machine has seen a management frame, so the association request counts); `publishStation(null)` clears the mark.
+- The watchdog is launched by `start(scope)` with the radio collectors (`radioJobs`), idles while nobody is associated, sleeps outside the lock, checks under it, survives a failing check (logged at error) and is cancelled and joined by `stop()`.
+- Log lines: `watchStationActivity(): station inactive, dropped -> sta= idleMs=` and `onDataFrame(): data from a station that is not associated, deauthenticating -> sta= reason=7`.
+- Residual: a kart that really enters 802.11 power save without sending null data would be dropped after 20 s; not seen on hardware.
+
+### Files
+- core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
+- core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/ApStateMachine.kt

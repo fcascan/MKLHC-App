@@ -182,7 +182,16 @@ before should stay paired. After the handshake the kart is expected to wait abou
 (the design's timeout: the kart resets if the app does not connect within 5 s after the handshake), give up, release the
 lease, deauthenticate and start over, so the milestones repeat every few seconds. That loop is expected. When the kart
 drops off, the spike frees the DHCP lease and aborts the kart's stale TCP connection, which the network stack logs at
-`INFO` level as `abortWithReset(): resetting the connection at the application's request`.
+`INFO` level as `abortWithReset(): resetting the connection at the application's request`. A kart that goes quiet
+without deauthenticating (switched off or out of range) is dropped once nothing has arrived from it for 20 seconds: the
+access point logs `station inactive, dropped -> sta=<kart mac> idleMs=<n>`, sends it a deauthentication and treats it
+like a kart that left.
+
+Optional check of that drop: switch the kart off (or carry it out of range) while it is associated, after
+`KartAssociated` and before it leaves on its own. About 20 seconds later the log shows `station inactive, dropped`,
+followed by the spike's `the station left, DHCP lease freed -> sta=<kart mac>`. If `station left` appears instead, the
+kart had deauthenticated just before; try again. A kart that comes back still believing it is associated is answered
+with `data from a station that is not associated, deauthenticating -> sta=<kart mac> reason=7` and joins again.
 
 A `radiod` error logged during the run (an `ERROR` line from `radiod` or `onEvent()`, or `CCMP rejected a frame`) does
 not stop the capture on its own, so do not read a clean exit as proof the run was good: confirm the milestones above and

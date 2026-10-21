@@ -104,11 +104,13 @@ import kotlin.time.TimeSource
  * the access point reports into a session loss at once, and every setup step that can block (the accept, the
  * handshake, the connects, the RCD calls) ends as soon as the session is lost. The access point reports what it
  * sees on the air: the kart's deauthentication or disassociation, or the kart authenticating again after a silent
- * power cycle. A kart that powers off or leaves range without sending a frame stays associated, and is noticed only
- * when TCP gives up on its connections (retransmission timeout or keepalive), which closes the RCD control channel
- * and loses the session the usual way; see the `TODO(access point)` on [Session.watchDeparture]. The loss then takes
- * the usual path: [LinkState.Recovering], teardown, the lease freed, and the kart awaited again, after a departure
- * without the recovery backoff (waiting for the kart to associate again already paces the loop).
+ * power cycle. A kart that powers off or leaves range without sending a frame is dropped by the access point once it
+ * has been silent for the access point's station inactivity timeout (`RadioOptions.stationInactivityTimeoutMs`, 20 s
+ * by default), which is reported as a departure too, even while the sequence waits in an accept. During a game
+ * session TCP may notice first (retransmission timeout or keepalive), which closes the RCD control channel and loses
+ * the session the usual way. The loss then takes the usual path: [LinkState.Recovering], teardown, the lease freed,
+ * and the kart awaited again, after a departure without the recovery backoff (waiting for the kart to associate again
+ * already paces the loop).
  *
  * While pairing, any session loss before the SetGroupInfo call starts (a departure, the RCD control channel closing,
  * or the stale RCD connection reset by the kart's reconnect) ends only that attempt: it is torn down and the app
@@ -884,17 +886,13 @@ class KartSessionRepository(
             lost.complete(reason)
         }
 
-        // TODO(access point): a station inactivity timeout in the access point (drop the station once it has sent
-        //  nothing for a few seconds) would report the silent departures too. Today a kart that powers off or leaves
-        //  range without a frame stays associated, and its session ends only when TCP retransmission or keepalive
-        //  gives up on the RCD control channel; a sequence waiting in an accept waits until the kart returns.
         /**
          * Arms the departure watcher: from now until the session ends, or until the returned job is cancelled, a
          * departure the access point reports signals the session lost. The access point reports the station's
-         * deauthentication or disassociation, and the station authenticating again (a kart that power cycled without
-         * a word and rejoins); a station that goes silent without a frame is not reported. Call it once the station
-         * is associated; a station already gone by then is caught at once ([KartRadioAp.associatedStation] replays
-         * its value).
+         * deauthentication or disassociation, the station authenticating again (a kart that power cycled without
+         * a word and rejoins), and a station that went silent, which it drops after its station inactivity timeout.
+         * Call it once the station is associated; a station already gone by then is caught at once
+         * ([KartRadioAp.associatedStation] replays its value).
          */
         fun watchDeparture(): Job = launch {
             radioAp.associatedStation.first { associated -> !associated }

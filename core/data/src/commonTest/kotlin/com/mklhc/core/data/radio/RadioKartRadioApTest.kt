@@ -571,7 +571,14 @@ class RadioKartRadioApTest {
             nowEpochSeconds = { 0L },
             randomInt = { bound -> if (bound == NONCE_COUNT) PAIRING_NONCE_INDEX else GAME_SEQUENCE_START },
         )
-        val accessPoint = RadioAccessPoint(radioLink(radio), RADIO_OPTIONS, crypto, capturingLogger(logs, "RadioAccessPoint"))
+        // Timed on the test's virtual clock, like everything else here, so the inactivity timeout follows virtual time.
+        val accessPoint = RadioAccessPoint(
+            radio = radioLink(radio),
+            options = RADIO_OPTIONS,
+            primitives = crypto,
+            log = capturingLogger(logs, "RadioAccessPoint"),
+            timeSource = test.testScheduler.timeSource,
+        )
         val ap = RadioKartRadioAp(
             accessPoint = accessPoint,
             pairingStore = store,

@@ -334,6 +334,141 @@ class ApStateMachineTest {
         assertEquals((second + 1) % 4096, third)
     }
 
+    // ---- Dropping a station -----------------------------------------------------------------
+
+    @Test
+    fun `dropStation returns a deauthentication for inactivity and forgets the station entirely`() {
+        associate(STATION_A)
+        val seen = ccmp.encrypt(config.network.ccmpKey, toDsHeader(STATION_A, MacAddress.BROADCAST), payload, pn(5))
+        ap.decryptData(seen)
+
+        val deauth = assertNotNull(Ieee80211Frame.parse(assertNotNull(ap.dropStation(ReasonCodes.DISASSOC_INACTIVITY))))
+
+        assertTrue(deauth.isDeauth)
+        assertEquals(STATION_A, deauth.addr1)
+        assertEquals(BSSID, deauth.addr2)
+        assertEquals(BSSID, deauth.addr3)
+        assertEquals(4, deauth.reasonCode())
+        assertEquals(ApState.Beaconing, ap.state)
+        assertNull(ap.station)
+        assertNull(ap.aid)
+        // The replay window starts afresh: a packet number already seen is accepted again.
+        assertEquals(payload.toHexString(), ap.decryptData(seen).toHexString())
+        // No longer authenticated either: an association request is answered as from an unknown station.
+        val refused = single(ap.onFrame(assocRequest(STATION_A)))
+        assertTrue(refused.isDeauth)
+        assertEquals(ReasonCodes.CLASS2_FRAME_FROM_NONAUTH_STA, refused.reasonCode())
+        assertEquals(ApState.Beaconing, ap.state)
+        // Authenticating and associating again works as usual.
+        associate(STATION_A)
+        assertEquals(ApState.Associated, ap.state)
+        assertEquals(STATION_A, ap.station)
+    }
+
+    @Test
+    fun `dropStation returns null and changes nothing when no station is associated`() {
+        assertNull(ap.dropStation(ReasonCodes.DISASSOC_INACTIVITY))
+
+        // Authenticated but not associated: nothing to drop, and the station can still associate.
+        single(ap.onFrame(authRequest(STATION_A)))
+        assertNull(ap.dropStation(ReasonCodes.DISASSOC_INACTIVITY))
+        assertTrue(single(ap.onFrame(assocRequest(STATION_A))).isAssocResponse)
+        assertEquals(ApState.Associated, ap.state)
+    }
+
+    // ---- Data from a station that is not associated -----------------------------------------
+
+    /** A null data frame from [sender] to [to], to-DS unless told otherwise; 4-address when both DS bits are set. */
+    private fun nullData(
+        sender: MacAddress,
+        to: MacAddress = BSSID,
+        toDs: Boolean = true,
+        fromDs: Boolean = false,
+    ): Ieee80211Frame = Ieee80211Frame(
+        frameControl = FrameControl.of(Ieee80211.TYPE_DATA, Ieee80211.SUBTYPE_NULL, toDs = toDs, fromDs = fromDs),
+        addr1 = to,
+        addr2 = sender,
+        addr3 = to,
+        addr4 = if (toDs && fromDs) sender else null,
+    )
+
+    /** Asserts [frame] is a reason 7 deauthentication from our BSSID to [station] and returns its sequence number. */
+    private fun assertClass3Deauthentication(station: MacAddress, frame: ByteArray?): Int {
+        val deauth = assertNotNull(Ieee80211Frame.parse(assertNotNull(frame, "a deauthentication is expected")))
+        assertTrue(deauth.isDeauth)
+        assertEquals(station, deauth.addr1)
+        assertEquals(BSSID, deauth.addr2)
+        assertEquals(BSSID, deauth.addr3)
+        assertEquals(ReasonCodes.CLASS3_FRAME_FROM_NONASSOC_STA, deauth.reasonCode())
+        return deauth.sequenceControl.sequenceNumber
+    }
+
+    @Test
+    fun `data from a station that is not associated is answered with a reason 7 deauthentication`() {
+        val probeSequence = single(ap.onFrame(probeRequest(STATION_A, SSID))).sequenceControl.sequenceNumber
+        val protectedData = assertNotNull(
+            Ieee80211Frame.parse(ccmp.encrypt(config.network.ccmpKey, toDsHeader(STATION_A, MacAddress.BROADCAST), payload, pn(1))),
+        )
+
+        val first = assertClass3Deauthentication(STATION_A, ap.rejectUnassociatedData(protectedData))
+        val second = assertClass3Deauthentication(STATION_A, ap.rejectUnassociatedData(nullData(STATION_A)))
+
+        // The answers take their numbers from the counter every transmitted frame shares.
+        assertEquals((probeSequence + 1) % 4096, first)
+        assertEquals((first + 1) % 4096, second)
+        assertEquals(ApState.Beaconing, ap.state)
+    }
+
+    @Test
+    fun `a station dropped for inactivity that keeps sending data is told again with reason 7 and can join again`() {
+        associate(STATION_A)
+        assertNotNull(ap.dropStation(ReasonCodes.DISASSOC_INACTIVITY))
+
+        assertClass3Deauthentication(STATION_A, ap.rejectUnassociatedData(nullData(STATION_A)))
+
+        associate(STATION_A)
+        assertEquals(STATION_A, ap.station)
+        assertNull(ap.rejectUnassociatedData(nullData(STATION_A)), "associated again: its data needs no answer")
+    }
+
+    @Test
+    fun `a reason 7 answer ends the authentication of a station that had only authenticated`() {
+        single(ap.onFrame(authRequest(STATION_A)))
+
+        assertClass3Deauthentication(STATION_A, ap.rejectUnassociatedData(nullData(STATION_A)))
+
+        // It was told it is deauthenticated, so the machine forgets it too: it must authenticate before associating.
+        val refused = single(ap.onFrame(assocRequest(STATION_A)))
+        assertTrue(refused.isDeauth)
+        assertEquals(ReasonCodes.CLASS2_FRAME_FROM_NONAUTH_STA, refused.reasonCode())
+        associate(STATION_A)
+        assertEquals(ApState.Associated, ap.state)
+    }
+
+    @Test
+    fun `the associated station, other networks, 4-address frames and group senders get no reason 7 answer`() {
+        associate(STATION_A)
+        val otherBssid = MacAddress.parse("02:99:99:99:99:99")
+        val groupSender = MacAddress.parse("03:00:00:00:00:01")
+        val unanswered = mapOf(
+            "the associated station's data" to nullData(STATION_A),
+            "data to another BSSID" to nullData(STATION_B, to = otherBssid),
+            "data that is not to-DS" to nullData(STATION_B, toDs = false),
+            "another access point's from-DS data" to nullData(otherBssid, to = STATION_B, toDs = false, fromDs = true),
+            "a 4-address frame" to nullData(STATION_B, fromDs = true),
+            "a group sender" to nullData(groupSender),
+            "a management frame" to assertNotNull(Ieee80211Frame.parse(authRequest(STATION_B))),
+        )
+
+        for ((what, frame) in unanswered) assertNull(ap.rejectUnassociatedData(frame), what)
+
+        assertEquals(STATION_A, ap.station)
+        // Another station's to-DS data to our BSSID is answered (it is not the associated one), and changes nothing here.
+        assertClass3Deauthentication(STATION_B, ap.rejectUnassociatedData(nullData(STATION_B)))
+        assertEquals(ApState.Associated, ap.state)
+        assertEquals(STATION_A, ap.station)
+    }
+
     // ---- Beacon -----------------------------------------------------------------------------
 
     @Test

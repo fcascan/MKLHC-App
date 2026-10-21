@@ -111,7 +111,12 @@ class RadioKartRadioAp(
     /** The one access point; it survives [stop] and [start] cycles, as the contract requires. */
     override val frameLink: FrameLink = accessPoint
 
-    /** Passed through, not mapped: a mapped flow would still say true for one dispatch after a stop or a switch. */
+    /**
+     * Passed through, not mapped: a mapped flow would still say true for one dispatch after a stop or a switch. It also
+     * turns false when the kart deauthenticates, and when it has sent nothing for the access point's inactivity timeout
+     * ([RadioOptions.stationInactivityTimeoutMs][com.mklhc.core.wifi_ap.ap.RadioOptions.stationInactivityTimeoutMs],
+     * 20 s by default): a kart that powered off or left range is dropped then instead of staying associated forever.
+     */
     override val associatedStation: StateFlow<Boolean> = accessPoint.isStationAssociated
 
     override fun requestAdapterPermission() {
