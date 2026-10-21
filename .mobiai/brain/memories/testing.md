@@ -129,3 +129,28 @@ GO for the pairing TCP on 5201 with the real link layer (RadioAccessPoint + Nets
 - app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikePairingProbe.kt
 - core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
 - docs/HARDWARE_SETUP.md
+
+## Hardware run: full pairing from the desktop app, game session with video and telemetry
+
+- id: hardware-run-full-pairing-from-the-desktop-app-20261021
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: session
+- date: 2026-10-21
+
+### Result (hardware, 2026-10-21, TP-Link Archer T3U on WinUSB, channel 6, `MKLHC_RADIO=2357:012d ./gradlew :app:run`)
+GO for the complete pairing from the desktop app. First attempt (commit 7c04f58): handshake complete, then the kart refused the connect to its pairing service 5106 (RST) and the app failed fatally without sending SetGroupInfo (see bugfix "Pairing from the desktop app failed: the kart refused the first connect"). Second attempt, with the connect retry in the working tree: Pair a kart, the kart scanned the QR in the window, SetGroupInfo went through, the kart reset onto the game network and the game session came up: about 86,700 decrypted frames in roughly 5 minutes, mostly 1452-octet video datagrams (UDP payload 1416) plus telemetry. Being decrypted with the game key, which the kart only gets through SetGroupInfo, is itself proof the pairing was stored. Closing the window ran the exit path: `shutdown(): requesting kart power-off`, every connection reset, `beacon stopped`, radiod down, data directory released; three WLAN scans confirmed the BSSID off air.
+
+### Kart behaviour observed
+- Telemetry type 3 (87 octets) arrives about every 100 ms and is not decoded yet (`type 3 telemetry is not specified yet`).
+- Video: the reassembler trims surplus octets at the end of nearly every frame (surplus 33-1376, frames 8,000-12,000 octets) and now and then drops a continuation with no frame in progress, so the frame length or the datagram layout it assumes is off. The desktop cockpit has no H.264 decoder by design (it only counts access units), so no picture was expected there. Next: a raw video-datagram dump to study the layout.
+
+### Not verified / issues
+- The pairing log lines (connectToKart refusals, group info sent, paired kart remembered) scrolled out of the Terminal panel's 1,000-line buffer before they were read: the debug log of every decrypted frame floods it. Keep a log file, or lower that per-frame line, for the next run.
+- Driving was not tried.
+
+### Files
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+- core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/video/LspVideoReassembler.kt
+- core/video/src/desktopMain/kotlin/com/mklhc/core/video/VideoSurface.desktop.kt

@@ -38,6 +38,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.cancellation.CancellationException
+import kotlin.time.Duration
 
 /**
  * A small kart simulator that drives the real orchestration end to end over the paired FrameLink.
@@ -64,6 +65,9 @@ import kotlin.coroutines.cancellation.CancellationException
  * @param deviceIdent the 16-octet device identity presented in the RCD handshake.
  * @param serial the kart serial reported in the product code.
  * @param character the character id reported in the product code.
+ * @param servicesLateBy how long after the handshake the kart starts listening on its service ports (the control and
+ *   event services in a game session, the pairing service while pairing), as the real kart does; until then it
+ *   answers a connect to them with a RST. Null listens before connecting to the app, so the services are always ready.
  */
 class FakeKart(
     private val radioAp: FakeKartRadioAp,
@@ -75,6 +79,7 @@ class FakeKart(
     val deviceIdent: ByteArray = ByteArray(IDENT_SIZE) { (it + 1).toByte() },
     val serial: String = "FK-0001",
     val character: Int = 1,
+    private val servicesLateBy: Duration? = null,
 ) {
     private val node = NetstackNode(
         frameLink = radioAp.stationLink,
@@ -152,26 +157,19 @@ class FakeKart(
         game?.close()
         game = null
         associateWith(KartNetworkKind.GAME)
-        val controlListener = node.tcp.listen(FujiPorts.CONTROL)
-        val eventListener = node.tcp.listen(FujiPorts.EVENT)
-        val sockets = GameSockets(controlListener, eventListener)
+        val sockets = GameSockets()
         game = sockets
-
-        sockets.jobs += scope.launch {
-            val connection = controlListener.accept()
-            sockets.controlConn = connection
-            val server = RcdServer(connection.asRcdTransport(), listOf(controlService()))
-            guard { server.serve() }
-        }
-        sockets.jobs += scope.launch {
-            // On the event channel the kart is the requester; this simulator sends nothing, so it just
-            // holds the accepted connection open so the app's event channel has a live peer.
-            sockets.eventConn = eventListener.accept()
-        }
+        if (servicesLateBy == null) hostGameServices(sockets)
 
         val rcdConnection = openAndConnect(KART_LOCAL_SESSION, config.sessionRcdPort)
         sockets.serverConn = rcdConnection
         clientHandshake(RcdClient(rcdConnection.asRcdTransport()), serverInfo, deviceName, deviceIdent, pairing = false, crypto)
+        if (servicesLateBy != null) {
+            delay(servicesLateBy)
+            // A session dropped or replaced during the wait must not get listeners nobody closes.
+            if (game !== sockets) return
+            hostGameServices(sockets)
+        }
 
         sockets.jobs += scope.launch {
             val lsp = openAndConnect(KART_LOCAL_VIDEO_CONTROL, config.videoControlPort)
@@ -183,6 +181,26 @@ class FakeKart(
                     lvniBytes += chunk
                 }
             }
+        }
+    }
+
+    /** Listens on the control and event ports and serves what the app connects there, for [sockets]' session. */
+    private fun hostGameServices(sockets: GameSockets) {
+        val controlListener = node.tcp.listen(FujiPorts.CONTROL)
+        val eventListener = node.tcp.listen(FujiPorts.EVENT)
+        sockets.controlListener = controlListener
+        sockets.eventListener = eventListener
+
+        sockets.jobs += scope.launch {
+            val connection = controlListener.accept()
+            sockets.controlConn = connection
+            val server = RcdServer(connection.asRcdTransport(), listOf(controlService()))
+            guard { server.serve() }
+        }
+        sockets.jobs += scope.launch {
+            // On the event channel the kart is the requester; this simulator sends nothing, so it just
+            // holds the accepted connection open so the app's event channel has a live peer.
+            sockets.eventConn = eventListener.accept()
         }
     }
 
@@ -203,28 +221,38 @@ class FakeKart(
         // A kart that left part-way through an earlier attempt comes back with a fresh stack.
         closePairing()
         associateWith(KartNetworkKind.PAIRING)
-        val pairingListener = node.tcp.listen(FujiPorts.PAIRING)
         val answered = CompletableDeferred<Unit>()
-        val serveJob = scope.launch {
-            val connection = pairingListener.accept()
-            val transport = AfterGroupInfoAnswer(connection.asRcdTransport()) {
-                radioAp.setStationAssociated(false)
-                onLeftPairing()
-                answered.complete(Unit)
+        var pairingListener: TcpListener? = null
+        var serveJob: Job? = null
+        val hostPairingService = {
+            val listener = node.tcp.listen(FujiPorts.PAIRING)
+            pairingListener = listener
+            serveJob = scope.launch {
+                val connection = listener.accept()
+                val transport = AfterGroupInfoAnswer(connection.asRcdTransport()) {
+                    radioAp.setStationAssociated(false)
+                    onLeftPairing()
+                    answered.complete(Unit)
+                }
+                val server = RcdServer(transport, listOf(pairingService()))
+                guard { server.serve() }
             }
-            val server = RcdServer(transport, listOf(pairingService()))
-            guard { server.serve() }
         }
+        if (servicesLateBy == null) hostPairingService()
 
         val rcdConnection = openAndConnect(KART_LOCAL_PAIRING, config.pairingRcdPort)
         clientHandshake(RcdClient(rcdConnection.asRcdTransport()), serverInfo, deviceName, deviceIdent, pairing = true, crypto)
+        if (servicesLateBy != null) {
+            delay(servicesLateBy)
+            hostPairingService()
+        }
 
         answered.await()
 
         // The reset onto the game network drops the pairing connections and the pairing service too.
-        serveJob.cancel()
+        serveJob?.cancel()
         runCatching { rcdConnection.abort() }
-        pairingListener.close()
+        pairingListener?.close()
 
         runGameSession()
     }
@@ -299,7 +327,7 @@ class FakeKart(
      */
     suspend fun connectToSessionThenLeave() {
         game?.close()
-        val sockets = GameSockets(controlListener = null, eventListener = null)
+        val sockets = GameSockets()
         game = sockets
         associateWith(KartNetworkKind.GAME)
         sockets.serverConn = openAndConnect(KART_LOCAL_SESSION, config.sessionRcdPort)
@@ -450,10 +478,10 @@ class FakeKart(
         }
     }
 
-    private inner class GameSockets(
-        private val controlListener: TcpListener?,
-        private val eventListener: TcpListener?,
-    ) {
+    /** What a game session holds; the service listeners stay null until the kart hosts its services. */
+    private inner class GameSockets {
+        var controlListener: TcpListener? = null
+        var eventListener: TcpListener? = null
         val jobs = ArrayList<Job>()
         var controlConn: TcpConnection? = null
         var eventConn: TcpConnection? = null

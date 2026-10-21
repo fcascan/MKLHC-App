@@ -346,7 +346,10 @@ run. A kart paired with the old identity no longer finds the game network, and m
    window. Put the kart in pairing mode (front LEDs blinking) and point its camera at the window.
 4. The kart joins the pairing network and connects. The app completes the pairing handshake and hands the kart the
    game network's name and key. The kart then resets onto the game network, the app identifies it and remembers it as
-   the paired kart, and the cockpit can drive it.
+   the paired kart, and the cockpit can drive it. Right after the handshake the kart may refuse the app's first
+   connects to its pairing (and later its control) service, because it starts listening a moment later; the app
+   retries every 100 ms for up to 5 seconds, which the log shows as
+   `connectToKart(): connected after the kart refused -> kartPort=5106 refusals=<n>`.
 
 If `radiod` crashes, the app starts it again and puts the same network back on air, with the same keys, so the kart can
 join again.
@@ -367,5 +370,6 @@ without that cleanup; if an adapter keeps beaconing after a hard kill, unplug it
 | `start(): radiod was not found, the radio stays off -> path=<path>` | Build `radiod` (see [Build radiod](#build-radiod)) or set `MKLHC_RADIOD` to its path. |
 | `launchOrNull(): cannot start radiod -> executable=<path>` | The file exists but cannot be run: it is not an executable for this system (a build for another operating system, or not a `radiod` build at all), or it lacks the execute permission on macOS or Linux (`chmod +x`). The supervisor keeps retrying with a growing delay; fix the file or `MKLHC_RADIOD` and start the app again. |
 | `radiod exited` warnings, and the app stays on its no-adapter state | `radiod` crashes at start-up. Its own output is logged under the `radiod-output` tag; on Windows, check that `libusb-1.0.dll` is next to `radiod.exe`. |
+| `the kart refused the connection to port <port> until the connect window of 5s elapsed` | The kart never started its service within the 5 seconds after the handshake. While pairing this ends the pairing (the screen shows the error; the kart keeps its old pairing): press cancel, which also takes the pairing network off the air, power cycle the kart and pair again. In a game session the app recovers on its own. |
 | `another MKLHC-App is already running with this data directory, not starting` | Another instance uses the same data directory (see above): close it. A second instance on another `MKLHC_DATA_DIR` has an identity of its own (a kart paired with the first one does not find it) and needs an adapter of its own (`MKLHC_RADIO`). |
 | `the data directory cannot be used, not starting` | The data directory (or its parent) cannot be created or written. Fix its permissions, or set `MKLHC_DATA_DIR` to a directory you can write. |

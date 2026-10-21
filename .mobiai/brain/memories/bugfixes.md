@@ -215,8 +215,26 @@ With the real access point (commit d0494af), a kart that drops off the network m
 - core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
 - core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpListener.kt
 
+## Pairing from the desktop app failed: the kart refused the first connect to its pairing service (5106)
+
+- id: pairing-from-the-desktop-app-failed-the-kart-refused-the-first-connect-20261021
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: session
+- date: 2026-10-21
+
+### Problem
+First full pairing from the desktop app on hardware (2026-10-21, commit 7c04f58, TP-Link Archer T3U, channel 6, fresh identity in %APPDATA%\MKLHC). Everything up to the handshake worked: auth/assoc, DHCP OFFER/ACK, ARP, TCP 5201 accepted, RCD pairing handshake complete (version 2). Right after the handshake the app opened TCP to the kart's pairing service (169.254.98.66:5106) and the kart answered the SYN with a RST: its service was not listening yet. `connectWithin` made one attempt, the `TcpResetException` was neither a programming error nor a session loss, so `orchestrate()` logged `fatal error -> connection reset by peer` and went to `Failed`. SetGroupInfo was never sent, so the kart kept its previous pairing. The node stopped but the pairing beacon stayed on air until the user pressed cancel, and the kart kept rejoining it (DHCP DISCOVERs unanswered, deauth reason 3) in the meantime.
+
+### Fix (applied, verified on hardware 2026-10-21: the next pairing completed, see testing "Hardware run: full pairing from the desktop app")
+OpenKart connects to the kart's services with `retry_connect` (util.py: 10 attempts, 0.1 s apart, 0.2 s timeout each). `KartSessionRepository.connectToKart` now opens, registers and connects each kart service (pairing 5106, control 5103, event 5107), and on a refused connect waits `CONNECT_RETRY_DELAY` (100 ms) and reopens from the same local port (the refused connection frees it in the same actor step that fails `connect()`), all inside the existing shared 5 s connect window. A window spent on refusals ends the session with `the kart refused the connection to port <p> until the connect window of 5s elapsed` (Recovering in a game session; fatal in pairing, as a timeout already was), the last wait is capped to what is left of the window, and a session loss ends the retries at once. TcpConnection.handleRst now logs a RST in SYN_SENT at info as `connection refused by peer` (the exception says so too) instead of an error per refusal. FakeKart gained `servicesLateBy` (listens on its service ports only that long after the handshake, so earlier connects get a RST from the netstack, as on hardware); tests cover pairing plus game session with late services, and a service that never listens.
+
+### Open
+- A fatal pairing error leaves the pairing beacon on air with the node stopped until cancel; consider stopping the beacon (or the radio) when the orchestrator fails.
+
 ### Files
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
-- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpEndpoint.kt
+- core/data/src/commonTest/kotlin/com/mklhc/core/data/session/FakeKart.kt
+- core/data/src/commonTest/kotlin/com/mklhc/core/data/session/KartSessionRepositoryTest.kt
 - core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
-- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpListener.kt

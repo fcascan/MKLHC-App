@@ -39,6 +39,7 @@ import com.mklhc.core.netstack.NetstackNode
 import com.mklhc.core.netstack.UdpEndpoint
 import com.mklhc.core.netstack.tcp.TcpConnection
 import com.mklhc.core.netstack.tcp.TcpListener
+import com.mklhc.core.netstack.tcp.TcpResetException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -74,6 +75,7 @@ import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.math.roundToInt
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.TimeMark
 import kotlin.time.TimeSource
 
@@ -530,8 +532,9 @@ class KartSessionRepository(
      * the kart leaving the network (it resets after a failed step, or is power cycled), the RCD control channel
      * closing, or the stale RCD connection reset by the kart's reconnect. The departure watcher is armed once the
      * kart is associated, every blocking step ends as soon as the session is lost, and the attempt then returns the
-     * reason so the caller tears it down and waits for the kart again. A failure while the session still stands (a
-     * connect that times out or is refused, a programming error) propagates and ends the pairing, as before.
+     * reason so the caller tears it down and waits for the kart again. A refused connect to the pairing service is
+     * retried within the connect window (see [connectToKart]). A failure while the session still stands (the connect
+     * window spent without a connection, a programming error) propagates and ends the pairing, as before.
      *
      * The watcher is disarmed before the SetGroupInfo call: from then on the kart leaving is its expected reset onto
      * the game network, and the call's own outcome decides. A departure published just before the disarm whose watcher
@@ -557,10 +560,7 @@ class KartSessionRepository(
 
             // One connect window opens here at handshake finalize and is shared by every connect that follows.
             val connectStart = timeSource.markNow()
-            val connection = node.tcp.open(config.pairingLocalPort, AddressPlan.KART_LEASE, FujiPorts.PAIRING)
-            session.register { runCatching { connection.abort() } }
-            session.untilLost { connectWithin(connection, connectStart) }
-            connection
+            connectToKart(node, session, config.pairingLocalPort, FujiPorts.PAIRING, connectStart)
         } catch (failure: Exception) {
             // CancellationException is an IllegalStateException: cancelPairing / stop always end the pairing.
             val programmingError = failure is IllegalArgumentException || failure is IllegalStateException
@@ -618,15 +618,11 @@ class KartSessionRepository(
             // opens here at handshake finalize and is shared by the control and event connects, so the two
             // together may take at most config.connectWindow, not that long each.
             val connectStart = timeSource.markNow()
-            val controlConn = node.tcp.open(config.controlLocalPort, AddressPlan.KART_LEASE, FujiPorts.CONTROL)
-            session.register { runCatching { controlConn.abort() } }
-            session.untilLost { connectWithin(controlConn, connectStart) }
+            val controlConn = connectToKart(node, session, config.controlLocalPort, FujiPorts.CONTROL, connectStart)
             val control = FujiControlClient(RcdClient(controlConn.asRcdTransport()))
             currentControl = control
 
-            val eventConn = node.tcp.open(config.eventLocalPort, AddressPlan.KART_LEASE, FujiPorts.EVENT)
-            session.register { runCatching { eventConn.abort() } }
-            session.untilLost { connectWithin(eventConn, connectStart) }
+            val eventConn = connectToKart(node, session, config.eventLocalPort, FujiPorts.EVENT, connectStart)
             val eventChannel = FujiEventChannel(eventConn.asRcdTransport())
             session.launch { runGuarded("event channel") { eventChannel.run() } }
 
@@ -826,20 +822,59 @@ class KartSessionRepository(
     }
 
     /**
-     * Connects [connection] within what is left of the single connect window that opened at [started], so the
-     * control, event and pairing connects share one budget rather than each getting the full window.
+     * Opens a connection from [localPort] to the kart's [kartPort] and connects it within what is left of the single
+     * connect window that opened at [started], so the control, event and pairing connects share one budget rather
+     * than each getting the full window. Every connection it opens is registered with [session] for teardown.
+     *
+     * Business logic: right after the handshake the kart may not listen on its service ports yet and answers the SYN
+     * with a RST (seen on hardware on the pairing service). A refused connect is retried every [CONNECT_RETRY_DELAY]
+     * from the same local port, which the refused connection has already freed, until the kart accepts. OpenKart
+     * (openkartd/util.py, `retry_connect`, BSD-3-Clause) retries the same way with the same delay, up to 10 attempts
+     * from ephemeral ports; here the shared window bounds the retries instead. Once the window is spent the session is
+     * lost, with a reason that names the refusal when there was one, and a loss of the session ends the retries at
+     * once.
      */
-    private suspend fun connectWithin(connection: TcpConnection, started: TimeMark) {
-        val remaining = config.connectWindow - started.elapsedNow()
-        if (remaining <= Duration.ZERO) {
-            throw SessionLostException("the connect window of ${config.connectWindow} elapsed before connecting to the kart")
-        }
-        try {
-            withTimeout(remaining) { connection.connect() }
-        } catch (timedOut: TimeoutCancellationException) {
-            throw SessionLostException("timed out connecting to the kart within ${config.connectWindow}")
+    private suspend fun connectToKart(
+        node: NetstackNode,
+        session: Session,
+        localPort: Int,
+        kartPort: Int,
+        started: TimeMark,
+    ): TcpConnection {
+        var refusals = 0
+        while (true) {
+            val remaining = config.connectWindow - started.elapsedNow()
+            if (remaining <= Duration.ZERO) throw connectWindowSpent(kartPort, refusals)
+            val connection = node.tcp.open(localPort, AddressPlan.KART_LEASE, kartPort)
+            session.register { runCatching { connection.abort() } }
+            try {
+                session.untilLost {
+                    try {
+                        withTimeout(remaining) { connection.connect() }
+                    } catch (timedOut: TimeoutCancellationException) {
+                        throw connectWindowSpent(kartPort, refusals)
+                    }
+                }
+                if (refusals > 0) log.i { "connectToKart(): connected after the kart refused -> kartPort=$kartPort refusals=$refusals" }
+                return connection
+            } catch (refused: TcpResetException) {
+                refusals++
+                log.d { "connectToKart(): the kart refused the connection, retrying -> kartPort=$kartPort refusals=$refusals message=${refused.message}" }
+                val left = config.connectWindow - started.elapsedNow()
+                if (left <= Duration.ZERO) throw connectWindowSpent(kartPort, refusals)
+                session.untilLost { delay(minOf(CONNECT_RETRY_DELAY, left)) }
+            }
         }
     }
+
+    /** The loss that ends a session whose connect window ran out before [kartPort] accepted a connection. */
+    private fun connectWindowSpent(kartPort: Int, refusals: Int): SessionLostException = SessionLostException(
+        if (refusals == 0) {
+            "timed out connecting to the kart on port $kartPort within ${config.connectWindow}"
+        } else {
+            "the kart refused the connection to port $kartPort until the connect window of ${config.connectWindow} elapsed"
+        },
+    )
 
     private suspend fun runGuarded(what: String, block: suspend () -> Unit) {
         try {
@@ -988,6 +1023,9 @@ class KartSessionRepository(
 
         /** Why a session ends when the kart leaves the access point; shown in [LinkState.Recovering]. */
         const val STATION_LEFT_REASON = "the kart left the network"
+
+        /** The wait before connecting again to a kart service that refused the connect (OpenKart waits 0.1 s too). */
+        val CONNECT_RETRY_DELAY = 100.milliseconds
 
         // Design 8.5: the pairing SSID's random tail is 12 octets (base64 to 16 characters after the prefix).
         const val SSID_RANDOM_SIZE = 12

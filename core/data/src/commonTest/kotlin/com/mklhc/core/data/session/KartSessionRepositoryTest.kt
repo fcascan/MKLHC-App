@@ -81,13 +81,14 @@ class KartSessionRepositoryTest {
         settings: KartSettings = KartSettings.DEFAULT,
         scope: CoroutineScope = backgroundScope,
         radioSeenByRepo: (FakeKartRadioAp) -> KartRadioAp = { it },
+        kartServicesLateBy: Duration? = null,
     ): Harness {
         val radio = FakeKartRadioAp()
         val store = store(settings)
         // The deadman and the connect window measure real elapsed time; the real monotonic clock does not
         // advance with virtual time, so give the repository the test scheduler's virtual time source.
         val repo = KartSessionRepository(radioSeenByRepo(radio), store, crypto, scope, clock = fixedClock, timeSource = testScheduler.timeSource)
-        val kart = FakeKart(radio, masterSecret(), scope, crypto)
+        val kart = FakeKart(radio, masterSecret(), scope, crypto, servicesLateBy = kartServicesLateBy)
         kart.start()
         return Harness(radio, store, repo, kart)
     }
@@ -271,6 +272,41 @@ class KartSessionRepositoryTest {
         val paired = assertNotNull(h.store.getPairedKart(), "the paired kart is persisted")
         assertEquals(h.kart.serial, paired.serial)
         assertContentEquals(h.kart.deviceIdent, paired.ident)
+    }
+
+    @Test
+    fun kartServicesThatListenLateAreRetriedUntilTheyAcceptPairingAndTheGameSession() = runTest {
+        // As on hardware: right after the handshake the kart answers a connect to its services with a RST.
+        val h = harness(kartServicesLateBy = 300.milliseconds)
+        val states = ArrayList<LinkState>()
+        backgroundScope.launch { h.repo.linkState.collect { states += it } }
+
+        h.repo.startPairing()
+        withTimeout(5_000) { h.repo.pairingQr.first { it != null } }
+        h.kart.runPairingThenGame()
+
+        val (ssid, _) = assertNotNull(h.kart.groupInfo, "the refused pairing connect was retried and the credentials handed over")
+        assertEquals(deriveKartIdentity(masterSecret(), crypto).gameSsid, ssid)
+        awaitDriving(h.repo)
+        assertTrue(states.none { it is LinkState.Failed }, "a refused connect is retried, never fatal: $states")
+        assertTrue(states.none { it is LinkState.Recovering }, "the retries fit in the connect window: $states")
+    }
+
+    @Test
+    fun aKartServiceThatNeverListensEndsTheSessionOnceTheConnectWindowElapses() = runTest {
+        val h = harness(kartServicesLateBy = 1_000.seconds)
+        h.repo.start()
+        backgroundScope.launch { h.kart.runGameSession() }
+
+        val handshaked = withTimeout(10_000) {
+            h.repo.linkState.first { it == LinkState.KartHandshaked }
+            testScheduler.timeSource.markNow()
+        }
+        val recovering = withTimeout(10_000) { h.repo.linkState.first { it is LinkState.Recovering } } as LinkState.Recovering
+        val retried = handshaked.elapsedNow()
+        assertTrue("refused the connection to port 5103" in recovering.reason, "the loss names the refusal: ${recovering.reason}")
+        val window = SessionConfig().connectWindow
+        assertTrue(retried >= window && retried <= window + 100.milliseconds, "it retried for the connect window, no longer: $retried")
     }
 
     // ---- recovery -----------------------------------------------------------------------------

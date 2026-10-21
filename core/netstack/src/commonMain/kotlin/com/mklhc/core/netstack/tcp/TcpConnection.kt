@@ -373,6 +373,12 @@ class TcpConnection internal constructor(
             log.d { "handleRst(): ignoring an out-of-window RST -> state=${_state.value} seq=${segment.sequenceNumber} rcvNxt=$rcvNxt" }
             return
         }
+        if (_state.value == TcpState.SYN_SENT) {
+            // A refused active open: routine for a peer that is not listening yet, and callers may retry it.
+            log.i { "handleRst(): connection refused by peer -> localPort=$localPort peer=$peer:$peerPort" }
+            abortLocally(TcpResetException("connection refused by peer"))
+            return
+        }
         log.e { "handleRst(): connection reset by peer -> state=${_state.value} localPort=$localPort peer=$peer:$peerPort" }
         abortLocally(TcpResetException("connection reset by peer"))
     }
