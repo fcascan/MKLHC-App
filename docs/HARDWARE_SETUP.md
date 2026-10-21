@@ -110,8 +110,8 @@ Options go through `--args` (quote paths that contain spaces):
 | `--channel <1\|6\|11>` | Wi-Fi channel (default 6). |
 | `--tx-power <0..255>` | TX power index; 0 keeps the chip default. Use a level that is legal where you are. |
 | `--beacon-interval <n>` | Beacon interval in time units of 1024 microseconds (default 100). |
-| `--out <dir>` | Where the capture and the QR image are written (default `spike-captures/`). |
-| `--duration <seconds>` | Stop after this long; 0 runs until you press Enter (default 0). |
+| `--out <dir>` | Where the capture, the QR image and the stop file are written or looked for (default `spike-captures/`). |
+| `--duration <seconds>` | Stop after this long; 0 runs until you press Enter or create the stop file (default 0). |
 | `--ready-timeout <seconds>` | How long to wait for the radio to come up before giving up (default 120). |
 | `--verbose` | Debug logging, including `radiod`'s own output. |
 | `--no-qr`, `--light-terminal` | Skip drawing the QR code in the console (the QR image file is still written), or draw it for a light terminal background. |
@@ -137,10 +137,43 @@ the `Pairing QR image` file in a browser or image viewer on the same computer an
 always dark on light. Never upload the image or paste the hex payload into an online QR tool: both hold the pairing seed
 of the run.
 
-Press **Enter** to stop (or use `--duration`). Stopping asks `radiod` to shut the radio down, which also stops the
-beacon. The Enter has to reach the spike through Gradle: if the run keeps going after it (on 2026-10-20 an Enter typed in
-the app's Terminal panel never arrived), prefer `--duration` for the next run. Ctrl+C under Gradle on Windows ends the
-spike without its cleanup, so after it unplug the adapter to stop the beacon (see the last row of the table below).
+To stop, press **Enter**, create the **stop file**, or use `--duration`. All three end the run cleanly: the spike asks
+`radiod` to shut the radio down, which also stops the beacon, and the QR image is deleted.
+
+The **stop file** is `spike.stop` in the `--out` directory. It needs no keyboard input at the spike. From any other
+terminal, in PowerShell, copy the `New-Item '...'` command from the `Spike running` line the spike prints (it holds the
+absolute path, so it works from any directory), or, from a terminal at the repository root with the default `--out`,
+run
+
+```
+New-Item spike-captures\spike.stop
+```
+
+The spike looks for the file twice a second and stops through the same clean path as Enter, logging
+`stopping -> reason=stop file found`. It deletes the file again once it stops, so the next run starts clean, and it
+deletes a file left by an earlier run before the radio comes up, so a forgotten file never ends a run by mistake (if a
+file cannot be deleted, the spike says which path to remove by hand and does not start). Use the stop file whenever
+Enter does not reach the spike. The Enter has to reach it through Gradle: on 2026-10-20 an Enter typed in the Claude
+desktop app's Terminal panel never arrived (see "Why Enter did not arrive" below). Ctrl+C under Gradle on Windows ends
+the spike without its cleanup, so use the stop file instead; after a Ctrl+C unplug the adapter to stop the beacon (see
+the last row of the table below).
+
+### Why Enter did not arrive
+
+Investigated without hardware: `.\gradlew.bat :app:runSpike --console=plain` and `--console=rich` with
+`--radiod C:\Windows\System32\whoami.exe`, an executable that exits at once, so radiod never connects and the run only
+ends by a stop trigger or by its 30 s `radiod did not connect` timeout. The Enter was written to the pipe feeding
+`gradlew.bat` twelve seconds after the start, from a script that kept the pipe open.
+
+- An Enter sent as LF or as CRLF stopped the run at once (`stopping -> reason=Enter pressed`, exit code 0), with the plain
+  and with the rich Gradle console: with a piped stdin the console type made no difference.
+- An Enter sent as a lone CR was ignored: the run went on until `radiod did not connect` after 34 s (exit code 1). The
+  spike used to read the Enter with `readlnOrNull()`, which waits for LF and never returns on a lone CR. A terminal
+  that writes the Enter key straight into a pipe, with no console in between to turn the CR into CRLF, sends exactly that.
+  The spike now treats a lone CR as an Enter too (re-run: stopped at once, `reason=Enter pressed`).
+- Not reproduced: the Claude desktop app's Terminal panel itself, which could not be driven from the investigation.
+  Whether it sends a lone CR, or does not forward its input to the Gradle client, is not known, so the cause there is
+  inconclusive; the stop file is the dependable way to stop from that terminal.
 
 ### Bringing the radio up (no kart needed)
 
@@ -229,7 +262,8 @@ The capture contains the kart's traffic. Keep it out of the repository (`spike-c
 | The kart joins but no `first data frame decrypted` appears | Look for `CCMP rejected a frame` in the log: the key does not match, which usually means a stale QR code was scanned. Restart the spike and scan the new one. |
 | The kart takes its address but `answering who-has` does not appear | Normal after the first cycle: the kart caches the app's address, so only the first association asks. If not even the first one does and `pairing TCP accepted` never follows, the kart did not get the DHCP ACK (look for `lease acknowledged`) or its ARP frame was not received. Try a closer position. |
 | `answering who-has` appears but `pairing TCP accepted` does not | The kart's connection to port 5201 did not complete. Run with `--verbose` and look at the `TcpEndpoint` and `TcpConnection` lines; the SYN-ACK has to reach the kart, so try a closer position. |
-| The beacon keeps airing after the spike was killed | Stop the spike with Enter or `--duration` so `radiod` can stop the beacon. RTL8822BU / RTL8812BU adapters (such as the Archer T3U) keep beaconing after a hard kill until they are unplugged, so unplug the adapter in that case. |
+| Enter does nothing and the spike keeps running | Create the stop file from another terminal: copy the `New-Item '...'` command from the `Spike running` line (it has the absolute path). The spike notices the file within half a second and stops cleanly. |
+| The beacon keeps airing after the spike was killed | Stop the spike with Enter, the stop file (the command is in the `Spike running` line) or `--duration` so `radiod` can stop the beacon, and do not use Ctrl+C under Gradle. RTL8822BU / RTL8812BU adapters (such as the Archer T3U) keep beaconing after a hard kill until they are unplugged, so unplug the adapter in that case. |
 
 Run the spike once with a stable setup and note what you changed (beacon interval, power, channel, timing): those
 values are the hardware tuning the project records after the spike.

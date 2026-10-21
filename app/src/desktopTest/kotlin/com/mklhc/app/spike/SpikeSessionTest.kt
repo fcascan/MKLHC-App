@@ -335,6 +335,126 @@ class SpikeSessionTest {
         assertFalse(Files.exists(outDir), "no capture file is created")
     }
 
+    // ---- The stop file ----------------------------------------------------------------------------
+
+    @Test
+    fun creatingTheStopFileDuringARunEndsItCleanlyAndTheFileIsGoneAfterwards() = sessionTest {
+        val logs = LogCapture()
+        val stop = CompletableDeferred<StopRequest>()
+        val session = async(Dispatchers.Default) {
+            runSpikeSession(args(), stop, launcher = launcher, nonceTable = knownNonceTable(), console = ConsoleCapture()::add, log = logs.logger())
+        }
+        val radiod = launcher.awaitProcess(0)
+        radiod.awaitMessages<RadioMessage.StartBeacon>(1)
+        val stopFile = outDir.resolve("spike.stop")
+        assertFalse(stop.isCompleted, "nothing has asked the run to stop yet")
+
+        Files.createFile(stopFile)
+
+        val code = withTimeoutOrNull(STOP_TIMEOUT_MS) { session.await() }
+        checkNotNull(code) { "the run did not stop within $STOP_TIMEOUT_MS ms of the stop file being created:\n${logs.text()}" }
+        assertEquals(EXIT_OK, code)
+        val request = stop.await()
+        assertEquals("stop file found", request.reason)
+        assertFalse(request.failed, "a stop file is a normal stop")
+        assertFalse(Files.exists(stopFile), "the stop file is deleted when it has ended the run, so the next run starts clean")
+        assertTrue(logs.has("runSpikeSession(): stopping -> reason=stop file found failed=false"), logs.text())
+
+        // The same clean path as Enter: the beacon stops, radiod is shut down and exits, nothing is launched again.
+        val afterBeacon = radiod.messages().dropWhile { it !is RadioMessage.StartBeacon }.drop(1).filter { it !is RadioMessage.TxFrame }
+        assertEquals(listOf<RadioMessage>(RadioMessage.StopBeacon, RadioMessage.Shutdown), afterBeacon)
+        assertEquals(1, launcher.processes.size, "radiod exited by itself after SHUTDOWN and was not launched again")
+        assertFalse(Files.exists(launcher.configs.single().socketPath.parent), "the socket and its directory are removed")
+        // Only the pcap is left in the out directory: the QR image went with the stop, and so did the stop file.
+        assertTrue(Files.list(outDir).use { files -> files.toList() }.single().fileName.toString().endsWith(".pcap"))
+    }
+
+    @Test
+    fun aStopFileLeftByAnEarlierRunIsRemovedAtStartAndDoesNotEndTheRun() = sessionTest {
+        Files.createDirectories(outDir)
+        val stopFile = Files.createFile(outDir.resolve("spike.stop"))
+        val console = ConsoleCapture()
+        val logs = LogCapture()
+        val stop = CompletableDeferred<StopRequest>()
+        val session = async(Dispatchers.Default) {
+            runSpikeSession(args(), stop, launcher = launcher, nonceTable = knownNonceTable(), console = console::add, log = logs.logger())
+        }
+        // A run that a stale file ended early never gets to its beacon: fail with what stopped it instead of hanging.
+        val beacon = withTimeoutOrNull(LOG_TIMEOUT_MS) {
+            launcher.awaitProcess(0).awaitMessages<RadioMessage.StartBeacon>(1)
+        }
+        checkNotNull(beacon) {
+            val reason = if (stop.isCompleted) stop.await().reason else "none"
+            "the beacon never started within $LOG_TIMEOUT_MS ms -> stopReason=$reason\n${console.text()}\n${logs.text()}"
+        }
+        val radiod = launcher.processes.first()
+
+        // The watcher looks as soon as it starts and then every STOP_FILE_POLL_MS: one more look after the beacon is enough
+        // to show that a file older than the run does not stop it.
+        delay(STOP_FILE_POLL_MS)
+
+        assertFalse(Files.exists(stopFile), "the stale stop file is removed before the radio comes up")
+        assertTrue(logs.has("removed a stop file left by an earlier run"), logs.text())
+        assertFalse(stop.isCompleted, "a file older than the run does not stop it:\n${logs.text()}")
+        assertFalse(session.isCompleted, "the run is still going")
+        assertTrue(radiod.messages().none { it is RadioMessage.StopBeacon || it is RadioMessage.Shutdown }, "radiod was left alone")
+
+        // Another stop still works, and the run ends the usual way.
+        stop.complete(StopRequest("test finished", failed = false))
+        assertEquals(EXIT_OK, session.await())
+        assertTrue(radiod.messages().any { it is RadioMessage.Shutdown })
+    }
+
+    @Test
+    fun aStopFileThatCannotBeRemovedAtStartRefusesTheRunBeforeAnythingIsStarted() = sessionTest {
+        // A directory that is not empty cannot be deleted, on any platform; as a stop file it would end the run at once.
+        val blocker = outDir.resolve("spike.stop")
+        Files.createDirectories(blocker)
+        Files.createFile(blocker.resolve("keep"))
+        val console = ConsoleCapture()
+
+        val code = runSpikeSession(args(), CompletableDeferred(), launcher = launcher, nonceTable = knownNonceTable(), console = console::add)
+
+        assertEquals(EXIT_USAGE, code)
+        assertTrue(console.text().contains("could not delete the stop file left by an earlier run"), console.text())
+        assertTrue(console.text().contains(blocker.toAbsolutePath().toString()), "the message names the path to delete: ${console.text()}")
+        assertTrue(launcher.processes.isEmpty(), "radiod is never started")
+        assertEquals(listOf("spike.stop"), Files.list(outDir).use { files -> files.toList() }.map { it.fileName.toString() }, "no capture and no QR image were created")
+    }
+
+    @Test
+    fun theRunningLineNamesTheStopFileByItsAbsolutePathAndHowToCreateItInPowerShell() = sessionTest {
+        // A relative --out, as typed by the user: the run's working directory is the repository root, a new terminal's is
+        // not, so the line has to carry the absolute path (the test's working directory stands in for the root).
+        val relativeOut = Path.of("build", "tmp", "spike-stop-file-test-${System.nanoTime()}")
+        try {
+            val console = ConsoleCapture()
+            val stop = CompletableDeferred<StopRequest>()
+            val session = async(Dispatchers.Default) {
+                runSpikeSession(args().copy(outDir = relativeOut), stop, launcher = launcher, nonceTable = knownNonceTable(), console = console::add)
+            }
+
+            val line = console.awaitLine("Spike running")
+
+            val stopFile = relativeOut.resolve("spike.stop").toAbsolutePath().toString()
+            assertFalse(relativeOut.isAbsolute, "the test gives --out as a relative path")
+            assertTrue(stopFile in line, "the stop file is named by its absolute path: $line")
+            assertTrue("New-Item ${powerShellQuoted(stopFile)}" in line, "the PowerShell command to create it is given: $line")
+            assertTrue("Press Enter to stop" in line, "Enter is still the first way to stop: $line")
+
+            stop.complete(StopRequest("test finished", failed = false))
+            assertEquals(EXIT_OK, session.await())
+        } finally {
+            relativeOut.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aPathWithAnApostropheIsQuotedForPowerShellByDoublingTheApostrophe() {
+        assertEquals("'C:\\it''s\\spike.stop'", powerShellQuoted("C:\\it's\\spike.stop"))
+        assertEquals("'C:\\with space\\spike.stop'", powerShellQuoted("C:\\with space\\spike.stop"))
+    }
+
     // ---- Fakes and helpers ------------------------------------------------------------------------
 
     private val primitives = CryptoPrimitives()
@@ -415,6 +535,19 @@ class SpikeSessionTest {
         }
 
         fun text(): String = lines.joinToString("\n")
+
+        /** Suspends until a line starting with [prefix] is printed and returns it; fails the test with the output if none is. */
+        suspend fun awaitLine(prefix: String): String {
+            val line = withTimeoutOrNull(LOG_TIMEOUT_MS) {
+                var found = lines.firstOrNull { it.startsWith(prefix) }
+                while (found == null) {
+                    delay(POLL_MS)
+                    found = lines.firstOrNull { it.startsWith(prefix) }
+                }
+                found
+            }
+            return checkNotNull(line) { "no console line starts with '$prefix' within $LOG_TIMEOUT_MS ms:\n${text()}" }
+        }
 
         /** The 62-octet pairing payload, from the hex line printed after its heading. */
         fun qrPayload(): ByteArray {
@@ -577,6 +710,9 @@ class SpikeSessionTest {
     private companion object {
         const val POLL_MS = 20L
         const val LOG_TIMEOUT_MS = 10_000L
+
+        /** How long a run may take to stop (a poll of the stop file plus the teardown) before the test gives up on it. */
+        const val STOP_TIMEOUT_MS = 15_000L
 
         /** The app's TCP pairing port (the production session's), and the fake kart's TCP numbers. */
         val PAIRING_PORT = SessionConfig().pairingRcdPort

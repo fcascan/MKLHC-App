@@ -122,7 +122,7 @@ GO for the pairing TCP on 5201 with the real link layer (RadioAccessPoint + Nets
 
 ### Not verified / issues
 - Station inactivity drop: not observed. The kart was switched off but apparently restarted within 20 s (cycles kept coming), so no `station inactive, dropped` line; repeat with the kart left off for at least 30 s.
-- Clean stop: an Enter typed in the app's Terminal panel never reached the spike under Gradle (the run kept cycling), so it was stopped with Ctrl+C, which under Gradle on Windows ends the JVM without its shutdown hook; the T3U was then unplugged and three WLAN scans confirmed the beacon off air. Prefer `--duration` until the spike gets a stop path that does not depend on Gradle forwarding stdin.
+- Clean stop: an Enter typed in the app's Terminal panel never reached the spike under Gradle (the run kept cycling), so it was stopped with Ctrl+C, which under Gradle on Windows ends the JVM without its shutdown hook; the T3U was then unplugged and three WLAN scans confirmed the beacon off air. Follow-up (2026-10-21): a piped Enter does reach the spike under Gradle, but a lone CR never ended `readlnOrNull()`, so the Enter reader now ends on CR too; and the spike can be stopped cleanly by creating the stop file `<out>\spike.stop` (the `New-Item` command with the absolute path is printed in the `Spike running` line).
 - The kart's stored pairing after these handshakes was not checked.
 
 ### Files

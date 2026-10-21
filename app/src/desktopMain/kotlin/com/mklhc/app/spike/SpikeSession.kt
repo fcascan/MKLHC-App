@@ -54,8 +54,17 @@ internal const val EXIT_OK = 0
 /** Exit code: the radio could not be brought up (or radiod never connected). */
 internal const val EXIT_RADIO_FAILED = 1
 
-/** Exit code: bad command line, or the radiod executable was not found. */
+/**
+ * Exit code: bad command line, the radiod executable was not found, or a stop file left by an earlier run cannot be
+ * removed.
+ */
 internal const val EXIT_USAGE = 2
+
+/** The name of the stop file, created inside the `--out` directory to end a run cleanly (see [runSpikeSession]). */
+internal const val STOP_FILE_NAME = "spike.stop"
+
+/** How often the stop file is looked for; the wait between two looks is a delay, never a busy loop. */
+internal const val STOP_FILE_POLL_MS = 500L
 
 /** Why a session is ending, and whether that counts as a failure. */
 internal class StopRequest(val reason: String, val failed: Boolean)
@@ -68,10 +77,16 @@ internal class StopRequest(val reason: String, val failed: Boolean)
  * temporary directory, starts the [RadioAccessPoint] (the link layer, recording to the pcap), the [NetstackNode] on top
  * of it (ARP, DHCP and TCP), the pairing probe and the radiod supervisor, and brings the radio up every time radiod
  * connects, serving the pairing network each time (so a radiod restart re-arms the beacon). Then it waits for [stop].
- * Cleanup always runs: the QR image is deleted first, then the bring-up, the pairing probe and the lease watcher are
- * cancelled and awaited (so nothing is brought up, served or announced while the radio shuts down), then the network
- * stack stops, then the access point stops the beacon and asks radiod to shut down, the supervisor is stopped once
- * radiod has exited by itself (so it does not launch it again), and the socket and its directory are removed.
+ * Cleanup always runs: the QR image is deleted first, then the bring-up, the pairing probe, the lease watcher and the
+ * stop file watcher are cancelled and awaited (so nothing is brought up, served or announced while the radio shuts
+ * down), then the network stack stops, then the access point stops the beacon and asks radiod to shut down, the
+ * supervisor is stopped once radiod has exited by itself (so it does not launch it again), and the socket and its
+ * directory are removed.
+ *
+ * The stop file `<out dir>/spike.stop` is the way to end a run cleanly when Enter cannot reach the process (see
+ * [installConsoleStopTriggers]). One left by an earlier run is removed before anything starts, and the run does not
+ * start ([EXIT_USAGE]) if that fails (see [clearStaleStopFile]); whatever file exists once the stop is taken is removed
+ * again, so the next run starts clean.
  *
  * What the spike answers is everything the kart needs up to the RCD pairing handshake: authentication and association,
  * DHCP, ARP and the TCP pairing port (see [runPairingProbe]). It stops there on purpose: it never sends the pairing
@@ -82,12 +97,12 @@ internal class StopRequest(val reason: String, val failed: Boolean)
  *
  * @param args the parsed command line.
  * @param stop completed by whoever wants the run to end (the console, the JVM shutdown hook, a test); a failed
- * bring-up and the `--duration` timer complete it too.
+ * bring-up, the `--duration` timer and the stop file watcher complete it too.
  * @param cleanupDone counted down when the cleanup has finished, so the shutdown hook can wait for it.
  * @param launcher how radiod is started; replaceable so a test can run a fake radiod in-process.
  * @param primitives the crypto provider.
  * @param nonceTable the LP2P nonce table; replaceable so a test knows which nonce was used.
- * @param console where the pairing information and the QR code are printed.
+ * @param console where the pairing information, the QR code and the way to stop the run are printed.
  * @param log the logger of the session's own milestones (the access point and the network stack log under their own
  * tags); injectable so a test can assert them.
  * @return [EXIT_OK], [EXIT_RADIO_FAILED] or [EXIT_USAGE].
@@ -119,6 +134,8 @@ internal suspend fun runSpikeSession(
         val pairing = createSpikePairing(primitives, nonceTable, args.channel, args.beaconIntervalTu)
 
         Files.createDirectories(args.outDir)
+        val stopFile = args.outDir.resolve(STOP_FILE_NAME)
+        if (!clearStaleStopFile(stopFile, console, log)) return EXIT_USAGE
         val fileStem = "spike-${LocalDateTime.now().format(FILE_TIME_FORMAT)}"
         val pcapPath = args.outDir.resolve("$fileStem.pcap")
         val qrPath = args.outDir.resolve("$fileStem-qr.svg")
@@ -173,6 +190,7 @@ internal suspend fun runSpikeSession(
                 }
                 sessionJobs += scope.launch { freeLeaseWhenStationLeaves(accessPoint.associatedStation, node, log) }
                 sessionJobs += scope.launch { runPairingProbe(node, accessPoint.associatedStation, primitives, log) }
+                sessionJobs += scope.launch { watchStopFile(stopFile, stop, log) }
                 supervisor.start()
                 sessionJobs += armBringUp(scope, link, accessPoint, pairing, stop, log) {
                     printPairing(pairing, qrPath, args, console, onAir = true)
@@ -183,10 +201,18 @@ internal suspend fun runSpikeSession(
                         stop.complete(StopRequest("duration elapsed", failed = false))
                     }
                 }
-                console("Spike running; capture goes to $pcapPath. Press Enter to stop (Ctrl+C also works).")
+                // The stop file as an absolute path: this process runs from the repository root, a new terminal need not.
+                console(
+                    "Spike running; capture goes to $pcapPath. Press Enter to stop, or create the stop file " +
+                        "(PowerShell: New-Item ${powerShellQuoted(stopFile.toAbsolutePath().toString())}). " +
+                        "Ctrl+C under Gradle on Windows skips the clean stop.",
+                )
 
                 val request = stop.await()
                 log.i { "runSpikeSession(): stopping -> reason=${request.reason} failed=${request.failed}" }
+                // Any file present now was created during this run: remove it before the radio teardown (which can take
+                // seconds), so the next run starts clean and the user sees that the stop was taken.
+                removeUsedStopFile(stopFile, console, log)
                 if (request.failed) EXIT_RADIO_FAILED else EXIT_OK
             } finally {
                 // The QR image goes first: it is not needed once the run is stopping, and the radio teardown below can
@@ -276,14 +302,99 @@ private fun armBringUp(
 }
 
 /**
+ * Waits for the stop file to appear and then asks the session to stop, through [stop], like Enter does.
+ *
+ * Business logic: Enter does not always reach the process (see [installConsoleStopTriggers]), and a run that is killed
+ * leaves the adapter beaconing. A file is a way to say "stop" from any other terminal, a file manager or a script, with
+ * no stdin involved: the run then goes through the same clean path (stop beacon, SHUTDOWN) as Enter, with
+ * `failed = false`. The file is looked for every [STOP_FILE_POLL_MS] with a delay, so the wait costs nothing between
+ * looks, and each look runs on [Dispatchers.IO]: the `--out` directory may be on a file system that hangs (a network
+ * share), and that must not stall the single-threaded dispatcher the access point and the network stack run on. It only
+ * checks that the file exists, which is enough because [clearStaleStopFile] removed any older one.
+ *
+ * Ends by itself once the file is found; otherwise it runs until cancelled. The session keeps it with its other jobs,
+ * so the cleanup cancels and awaits it before the node and the access point stop.
+ *
+ * @param stopFile the file to wait for.
+ * @param stop completed with the stop request when the file appears.
+ * @param log the session's logger.
+ */
+private suspend fun watchStopFile(stopFile: Path, stop: CompletableDeferred<StopRequest>, log: Logger) {
+    while (!withContext(Dispatchers.IO) { Files.exists(stopFile) }) delay(STOP_FILE_POLL_MS)
+    log.i { "watchStopFile(): the stop file appeared -> path=$stopFile" }
+    stop.complete(StopRequest(STOP_FILE_REASON, failed = false))
+}
+
+/**
+ * Deletes a stop file left by an earlier run, before the radio comes up.
+ *
+ * Business logic: a stale file never stops a new run: the watcher must not act on a file older than the run, or a
+ * forgotten file would end every run at once. When the file cannot be deleted (a directory with that name, or a file
+ * another program holds open on Windows) the run must not start either, since the watcher would stop it at once: the
+ * console says which path to delete by hand, and nothing has been started yet.
+ *
+ * @param stopFile the stop file of this run.
+ * @param console where the problem is reported.
+ * @param log the session's logger.
+ * @return true when there is no stop file any more, false when it could not be deleted.
+ */
+private fun clearStaleStopFile(stopFile: Path, console: (String) -> Unit, log: Logger): Boolean {
+    try {
+        if (Files.deleteIfExists(stopFile)) {
+            log.i { "clearStaleStopFile(): removed a stop file left by an earlier run -> path=$stopFile" }
+        }
+        return true
+    } catch (failure: IOException) {
+        log.w {
+            "clearStaleStopFile(): could not delete the stop file left by an earlier run -> path=$stopFile " +
+                "message=${failure.message}"
+        }
+        console(
+            "error: could not delete the stop file left by an earlier run; delete it by hand and start again: " +
+                "${stopFile.toAbsolutePath()}",
+        )
+        return false
+    }
+}
+
+/**
+ * Deletes the stop file, if there is one, once the run has taken its stop request.
+ *
+ * Business logic: a file that exists at this point was created during this run (the stale one was removed at the
+ * start), so whichever way the run is stopping it has done its job and can go; the next run then starts clean. Nothing
+ * is logged when there was no file (Enter, `--duration`). A failure (a program that still holds the file open) is
+ * reported on the console with the path, and the next start refuses to run until the file is gone.
+ *
+ * @param stopFile the stop file of this run.
+ * @param console where a failure is reported.
+ * @param log the session's logger.
+ */
+private fun removeUsedStopFile(stopFile: Path, console: (String) -> Unit, log: Logger) {
+    try {
+        if (Files.deleteIfExists(stopFile)) {
+            log.i { "removeUsedStopFile(): the stop file was taken and removed -> path=$stopFile" }
+        }
+    } catch (failure: IOException) {
+        log.w { "removeUsedStopFile(): could not delete the stop file -> path=$stopFile message=${failure.message}" }
+        console(
+            "warning: could not delete the stop file; delete it by hand before the next run: " +
+                "${stopFile.toAbsolutePath()}",
+        )
+    }
+}
+
+/** [text] as a PowerShell single-quoted string, so a path with spaces or an apostrophe can be pasted as it is. */
+internal fun powerShellQuoted(text: String): String = "'" + text.replace("'", "''") + "'"
+
+/**
  * Cancels the session's long-running jobs and waits for them to end, for at most [SESSION_JOBS_END_TIMEOUT_MS].
  *
- * Business logic: the bring-up, the pairing probe and the lease watcher keep running while the cleanup shuts the
- * network stack and the radio down. A bring-up that is still waiting for READY could otherwise complete while the
- * access point stops, and serve the network (or print the on-air banner) on a radio that is going away. Ending them
- * first means nothing new starts during the shutdown; the probe's own cleanup (a RST for each of its connections) runs
- * here too, while the stack is still alive. The wait is bounded so a job that cannot end never keeps the beacon on
- * air: the teardown goes on and the scope's cancellation at the end finishes the job.
+ * Business logic: the bring-up, the pairing probe, the lease watcher and the stop file watcher keep running while the
+ * cleanup shuts the network stack and the radio down. A bring-up that is still waiting for READY could otherwise
+ * complete while the access point stops, and serve the network (or print the on-air banner) on a radio that is going
+ * away. Ending them first means nothing new starts during the shutdown; the probe's own cleanup (a RST for each of its
+ * connections) runs here too, while the stack is still alive. The wait is bounded so a job that cannot end never keeps
+ * the beacon on air: the teardown goes on and the scope's cancellation at the end finishes the job.
  *
  * Call it under `NonCancellable`, so a cancelled session still ends them.
  *
@@ -365,6 +476,7 @@ private const val WORK_DIR_PREFIX = "mklhc-spike"
 private const val RADIOD_CONNECT_TIMEOUT_MS = 30_000L
 private const val RADIOD_EXIT_GRACE_MS = 3_000L
 private const val SESSION_JOBS_END_TIMEOUT_MS = 3_000L
+private const val STOP_FILE_REASON = "stop file found"
 
 private val FILE_TIME_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")
 private val RADIOD_CANDIDATES = listOf(
