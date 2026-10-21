@@ -402,3 +402,27 @@ Cmd+Q, the shutdown hook in a real run and the POSIX permission tests are untest
 - app/src/desktopMain/kotlin/com/mklhc/app/Main.kt
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/RadioKartRadioAp.kt
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+
+## Desktop video is decoded with FFmpeg (JavaCPP presets, LGPL build)
+
+- id: desktop-video-is-decoded-with-ffmpeg-javacpp-lgpl-20261021
+- type: decision
+- status: active
+- platform: kmp
+- area: video
+- date: 2026-10-21
+
+### Decision
+The desktop `VideoSurface` decodes the kart's H.264 with FFmpeg 8.1.2 through `org.bytedeco:ffmpeg:8.1.2-1.5.14` + `org.bytedeco:javacpp:1.5.14`, the default LGPL build (never the `-gpl` classifiers), with only the building OS's native classifier (20-30 MB). `H264FrameDecoder` (core/video desktopMain): single-threaded with AV_CODEC_FLAG_LOW_DELAY so each picture comes out of the call that fed it, the shared `KeyframeGate` (waits for IDR + SPS/PPS, prepends them on a restart), libswscale to packed BGRA, flush + wait for the next IDR on an error, gives up after 30 failures in a row; FFmpeg's warnings go to Kermit (tag FFmpeg). The surface decodes on its own single-thread loop and draws the newest picture with ContentScale.Fit; "Waiting for video" plus the frame count until the first picture; "Video preview unavailable" (any picture taken down) when FFmpeg cannot load, the decoder gives up or the loop fails; the decoder reuses one BGRA buffer, copied into a Skia image per picture. Android keeps MediaCodec.
+
+### Reason
+The stream is H.264 High profile, CABAC, 8x8 transform, 1280x800 at 30 fps: no pure-Java decoder handles it (jcodec is Main profile only), and VLC/GStreamer bindings need a system install. FFmpeg decodes it in about 3.3 ms per picture including the BGRA conversion. LGPL with unmodified dynamically loaded libraries is compatible with the app's AGPL-3.0; THIRD_PARTY_NOTICES lists FFmpeg and JavaCPP.
+
+### Verified
+Tests decode synthetic I_PCM streams written by the project (`SyntheticH264`, no recorded video, no encoder). A throwaway replay of the 90 s live capture through the Kotlin reassembler and this decoder gave 2,700 pictures from 2,700 frames with no FFmpeg warning. Not yet seen live in the cockpit window.
+
+### Files
+- core/video/src/desktopMain/kotlin/com/mklhc/core/video/H264FrameDecoder.kt
+- core/video/src/desktopMain/kotlin/com/mklhc/core/video/VideoSurface.desktop.kt
+- core/video/build.gradle.kts
+- THIRD_PARTY_NOTICES.md

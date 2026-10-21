@@ -12,6 +12,9 @@ koin = "4.1.1"
 koinCompose = "4.1.1"
 datastore = "1.1.7"
 zxingCore = "3.5.4"
+# FFmpeg 8.1.2 through the JavaCPP presets (desktop H.264 decoding); the default LGPL build, never the -gpl one
+bytedecoFfmpeg = "8.1.2-1.5.14"
+bytedecoJavacpp = "1.5.14"
 
 # AndroidX / JetBrains androidx ports (KMP)
 androidxActivityCompose = "1.11.0"
@@ -55,6 +58,10 @@ androidx-datastore-preferences-core = { module = "androidx.datastore:datastore-p
 
 # QR codes
 zxing-core = { module = "com.google.zxing:core", version.ref = "zxingCore" }
+
+# Video decoding on the desktop (the native libraries come from a per-OS classifier, see core/video)
+bytedeco-ffmpeg = { module = "org.bytedeco:ffmpeg", version.ref = "bytedecoFfmpeg" }
+bytedeco-javacpp = { module = "org.bytedeco:javacpp", version.ref = "bytedecoJavacpp" }
 
 # AndroidX / JetBrains androidx ports
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "androidxActivityCompose" }

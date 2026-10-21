@@ -126,7 +126,7 @@ class CockpitScreenTest {
         onNodeWithContentDescription("Throttle").assertExists()
         onNodeWithContentDescription("Brake light, hold to light").assertExists()
         onNodeWithContentDescription("Leave the cockpit").assertExists()
-        onNodeWithText("Video preview unavailable on desktop").assertExists()
+        onNodeWithText("Waiting for video").assertExists()
         onNodeWithText(waitingHint).assertDoesNotExist()
         // A frame must actually be drawn: the instruments and the controls are canvases that only run when rendered.
         val image = onRoot().captureToImage()

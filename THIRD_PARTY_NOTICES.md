@@ -13,3 +13,5 @@ Every external origin the project draws on is listed below, with its repository,
 | hostapd (static_ccmp_key patch) | https://github.com/OpenKart-SDK/hostapd | BSD-3-Clause | Static-CCMP access-point behaviour re-implemented; no code copied. |
 | libusb | https://github.com/libusb/libusb | LGPL-2.1-only | USB access used by `radiod`. |
 | ZXing core | https://github.com/zxing/zxing | Apache-2.0 | QR code generation for pairing. |
+| FFmpeg (libavcodec, libavutil, libswscale) | https://ffmpeg.org | LGPL-2.1-or-later | Desktop H.264 decoding of the kart's camera. Used as the unmodified, dynamically loaded native libraries of the LGPL build of `org.bytedeco:ffmpeg` (8.1.2-1.5.14); the optional GPL build is not used. The FFmpeg source is at https://ffmpeg.org/download.html. |
+| JavaCPP and the JavaCPP Presets for FFmpeg | https://github.com/bytedeco/javacpp-presets | Apache-2.0 | Java bindings that load and call the FFmpeg libraries (`org.bytedeco:javacpp`, `org.bytedeco:ffmpeg`). |

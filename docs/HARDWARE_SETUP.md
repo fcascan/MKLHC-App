@@ -366,8 +366,9 @@ without that cleanup; if an adapter keeps beaconing after a hard kill, unplug it
 
 ### Dump the raw video
 
-The desktop app has no H.264 decoder yet: its cockpit shows a black box that only counts the video frames. To study the
-kart's video stream with real data, set `MKLHC_VIDEO_DUMP` to a folder before starting the app (in PowerShell,
+The desktop app decodes the kart's camera with FFmpeg and shows it in the cockpit; until the first picture decodes
+the cockpit says it is waiting for video and counts the frames received. To study the kart's video stream with real
+data, set `MKLHC_VIDEO_DUMP` to a folder before starting the app (in PowerShell,
 `$env:MKLHC_VIDEO_DUMP = "spike-captures\video"`). The app then writes every datagram that reaches its video port, exactly
 as received and before any reassembly, to `video-<date>-<time>.viddump` in that folder (created if needed), one file per
 run; its first log lines name the file (`open(): dumping the raw video datagrams -> path=<file>`). Closing the window

@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Desktop placeholder of the video surface -->
-    <string name="video_unavailable_desktop">Video preview unavailable on desktop</string>
+    <!-- Desktop video surface -->
+    <string name="video_waiting">Waiting for video</string>
+    <string name="video_unavailable_desktop">Video preview unavailable</string>
     <string name="video_frames_received">Receiving video: %1$d frames</string>
+    <string name="video_camera_description">Kart camera</string>
 </resources>
