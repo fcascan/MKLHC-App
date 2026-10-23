@@ -263,9 +263,12 @@ class SpikeSessionTest {
     @Test
     fun aRadiodRestartBringsTheRadioUpAgainOnTheNewConnection() = sessionTest {
         val stop = CompletableDeferred<StopRequest>()
-        val session = async(Dispatchers.Default) { runSpikeSession(args(), stop, launcher = launcher, nonceTable = knownNonceTable(), console = ConsoleCapture()::add) }
+        // The adapter named on the command line, not the default: --vid and --pid reach every bring-up.
+        val args = args().copy(vid = 0x2357, pid = 0x012D)
+        val session = async(Dispatchers.Default) { runSpikeSession(args, stop, launcher = launcher, nonceTable = knownNonceTable(), console = ConsoleCapture()::add) }
         val first = launcher.awaitProcess(0)
         val firstBeacon = first.awaitMessages<RadioMessage.StartBeacon>(1).single()
+        assertEquals(RadioMessage.OpenDevice(0x2357, 0x012D), first.messages()[1])
 
         first.crash() // radiod dies; the supervisor restarts it after its backoff and the link accepts the new one
 
@@ -274,7 +277,9 @@ class SpikeSessionTest {
         assertEquals(
             listOf("Hello", "OpenDevice", "Init", "SetIdentity", "StartBeacon"),
             second.messages().map { it::class.simpleName },
+            "the spike names its adapter and never scans",
         )
+        assertEquals(RadioMessage.OpenDevice(0x2357, 0x012D), second.messages()[1])
         assertContentEquals(firstBeacon.beacon, secondBeacon.beacon, "the same pairing network is beaconed again")
 
         stop.complete(StopRequest("test finished", failed = false))

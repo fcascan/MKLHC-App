@@ -2,6 +2,7 @@ package com.mklhc.core.wifi_ap.ap
 
 import co.touchlab.kermit.Logger
 import com.mklhc.core.crypto.CryptoPrimitives
+import com.mklhc.core.domain.UsbId
 import com.mklhc.core.netstack.FrameLink
 import com.mklhc.core.netstack.LinkPayload
 import com.mklhc.core.radio.RadioFrame
@@ -49,12 +50,10 @@ import kotlin.time.TimeSource
 /**
  * The radio tunables that are not part of the network description ([ApConfig]).
  *
- * Business logic: one value set per adapter and platform. The defaults are the reference adapter on desktop, opened
- * by USB vendor/product id (the Android form, which hands radiod a file descriptor, comes in Phase 2), and the
- * 802.11g settings the kart network uses.
+ * Business logic: one value set per platform. The defaults are the 802.11g settings the kart network uses. Which
+ * adapter is opened is not a tunable: it is resolved right before each bring-up from the user's choice and the devices
+ * present, and handed to [RadioAccessPoint.bringUp].
  *
- * @property vid the adapter's USB vendor id; the default is the reference RTL8812CU (0bda:c812).
- * @property pid the adapter's USB product id.
  * @property bandwidthMhz the channel width handed to radiod's INIT (20 MHz: the kart network is 802.11g).
  * @property txPowerIndex the TX power index for INIT; 0 keeps the chip default.
  * @property txRate the rate string for every frame the access point transmits.
@@ -65,8 +64,6 @@ import kotlin.time.TimeSource
  * @throws IllegalArgumentException if [stationInactivityTimeoutMs] is negative.
  */
 data class RadioOptions(
-    val vid: Int = DEFAULT_VID,
-    val pid: Int = DEFAULT_PID,
     val bandwidthMhz: Int = DEFAULT_BANDWIDTH_MHZ,
     val txPowerIndex: Int = 0,
     val txRate: String = DEFAULT_TX_RATE,
@@ -82,12 +79,6 @@ data class RadioOptions(
     }
 
     companion object {
-        /** USB vendor id of the reference adapter (RTL8812CU). */
-        const val DEFAULT_VID = 0x0BDA
-
-        /** USB product id of the reference adapter (RTL8812CU). */
-        const val DEFAULT_PID = 0xC812
-
         /**
          * How long to wait for READY by default. INIT loads the firmware and the PHY tables; on Windows the 8822B
          * (TP-Link Archer T3U) needed about 46 s, because each of its ~44,000 BB/AGC/RF table writes is a USB control
@@ -120,8 +111,8 @@ data class RadioOptions(
  *
  * - [start] subscribes to the radio's two hot flows (received frames and radiod notifications) before anything is
  *   commanded, because they have no replay and an answer arriving before the subscription would be lost.
- * - [bringUp] opens the adapter and brings the radio up on a channel, waiting for radiod's READY. It is called again
- *   whenever radiod restarts; after it nothing is beaconing and no network is served.
+ * - [bringUp] opens the adapter it is given and brings the radio up on a channel, waiting for radiod's READY. It is
+ *   called again whenever radiod restarts; after it nothing is beaconing and no network is served.
  * - [serve] starts (or switches to) one network: a fresh [ApStateMachine], so the station table is reset and any
  *   associated station is dropped (switching networks resets the station table by design), the BSSID handed to the
  *   hardware ACK engine, and the hardware beacon started or replaced.
@@ -282,21 +273,23 @@ class RadioAccessPoint(
     }
 
     /**
-     * Brings the radio up on [channel]: OPEN_DEVICE, INIT, then waits for radiod's READY. A new bring-up means radiod
-     * restarted or the radio was down, so the served network and its station are forgotten and the next [serve] sets
-     * the identity and starts the beacon again.
+     * Brings the radio up on [channel] with [adapter]: OPEN_DEVICE, INIT, then waits for radiod's READY. A new bring-up
+     * means radiod restarted or the radio was down, so the served network and its station are forgotten and the next
+     * [serve] sets the identity and starts the beacon again.
      *
      * A [stop] that runs while this waits wakes it up as soon as the collectors are gone, and a READY that still
      * arrives after a stop began is not taken: the channel is recorded only if no stop ran since this bring-up began,
      * checked under the lock.
      *
      * @param channel the 2.4 GHz channel, one of [ApConfig.ALLOWED_CHANNELS]; every served network must use it.
+     * @param adapter the USB id of the adapter radiod opens (desktop form; the Android form, which hands radiod a file
+     *   descriptor, comes in Phase 2). The caller resolves it right before the bring-up.
      * @throws IllegalStateException if [start] was not called, [stop] ran while this was in progress (nothing is
      * recorded, so a following [serve] fails), radiod reports an error, or READY does not arrive within
      * [RadioOptions.readyTimeoutMs].
      * @throws IllegalArgumentException if [channel] is not one of [ApConfig.ALLOWED_CHANNELS].
      */
-    suspend fun bringUp(channel: Int) {
+    suspend fun bringUp(channel: Int, adapter: UsbId) {
         check(radioJobs.isNotEmpty()) { "bringUp(): start() must be called first, or radiod's answer is missed" }
         require(channel in ApConfig.ALLOWED_CHANNELS) {
             "bringUp(): channel must be one of ${ApConfig.ALLOWED_CHANNELS} -> channel=$channel"
@@ -309,10 +302,10 @@ class RadioAccessPoint(
         if (dropped != null) log.i { "bringUp(): the radio restarts, station dropped -> sta=$dropped" }
 
         log.i {
-            "bringUp(): opening the adapter -> vid=${hex4(options.vid)} pid=${hex4(options.pid)} " +
-                "channel=$channel bandwidthMhz=${options.bandwidthMhz} txPowerIndex=${options.txPowerIndex}"
+            "bringUp(): opening the adapter -> adapter=$adapter channel=$channel " +
+                "bandwidthMhz=${options.bandwidthMhz} txPowerIndex=${options.txPowerIndex}"
         }
-        radio.openDevice(options.vid, options.pid)
+        radio.openDevice(adapter.vid, adapter.pid)
         radio.init(channel, options.bandwidthMhz, options.txPowerIndex)
 
         val result = withTimeoutOrNull(options.readyTimeoutMs) { outcome.first { it !is RadioOutcome.Pending } }
@@ -790,8 +783,6 @@ class RadioAccessPoint(
         }
     }
 
-    private fun hex4(value: Int): String = value.toString(HEX_RADIX).padStart(HEX4_DIGITS, '0')
-
     /** The network being served: its description and the state machine that answers for it. */
     private class ServedNetwork(val config: ApConfig, val machine: ApStateMachine) {
         val bssid: MacAddress get() = config.bssid
@@ -821,7 +812,6 @@ class RadioAccessPoint(
 
         private const val TAG = "RadioAccessPoint"
         private const val HEX_RADIX = 16
-        private const val HEX4_DIGITS = 4
         private const val FRAME_KIND_DATA = "data"
         private const val FRAME_KIND_MANAGEMENT = "management"
 

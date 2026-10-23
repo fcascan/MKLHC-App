@@ -8,7 +8,8 @@ the desktop app itself with the radio, to pair the kart and drive it (see
 
 ## What you need
 
-- A supported USB Wi-Fi adapter (see the next section). The reference adapter is the RTL8812CU, USB ID `0bda:c812`.
+- A supported USB Wi-Fi adapter (see the next section). The reference adapter is the RTL8812CU, USB ID `0bda:c812`; the
+  TP-Link Archer T3U (`2357:012d`) is the one tested with the kart.
 - The kart, charged, and able to enter pairing mode (front LEDs blinking).
 - A desktop computer with a USB 2.0 or 3.0 port. These steps are written for Windows; Linux notes are included.
 - JDK 21 (Gradle provisions it for the build), and the native radio helper `radiod` built once (see
@@ -28,7 +29,8 @@ under Details, Hardware Ids, for example `USB\VID_0BDA&PID_C812`).
 | `0bda:c811` | RTL8811CU | COMFAST CF-811AC | Not recommended for now: the userspace driver applies the unicast retry limit, which the kart link relies on, only on the 8822B, not on this chip. |
 | `0bda:8812` | RTL8812AU | ALFA AWUS036ACH | Allowed, not recommended: this chip family has no hardware retries for unicast frames, so frames to the kart can be lost. |
 
-The spike opens `0bda:c812` by default; use `--vid` and `--pid` (hexadecimal) for another adapter from the table.
+The desktop app finds the adapter by itself: see [Choose the adapter](#choose-the-adapter). The spike opens `0bda:c812`
+by default; use `--vid` and `--pid` (hexadecimal) for another adapter from the table.
 
 ### Adapters that are NOT supported
 
@@ -284,23 +286,25 @@ bound to WinUSB and plugged in, from the repository root:
 
 `:app:run` starts the app from the repository root, so it finds `radiod` where the spike does. The app takes no options
 on the command line other than `--demo`; it reads environment variables, set in the same shell before the command (in
-PowerShell, for example, `$env:MKLHC_RADIO = "2357:012d"`):
+PowerShell, for example, `$env:MKLHC_DATA_DIR = "D:\mklhc"`). None is needed for a normal run: the adapter is chosen
+on the Kart link screen (see [Choose the adapter](#choose-the-adapter)).
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `MKLHC_RADIO` | The adapter's USB ID as `vvvv:pppp`, in hexadecimal. | `0bda:c812`, the reference adapter. The TP-Link Archer T3U is `2357:012d`. |
 | `MKLHC_RADIOD` | The `radiod` executable. | The first build found in `radiod/build` (see [Build radiod](#build-radiod)), from the working directory. |
 | `MKLHC_DATA_DIR` | Where the app keeps its pairing identity. | `%APPDATA%\MKLHC` on Windows, `~/Library/Application Support/MKLHC` on macOS, `$XDG_CONFIG_HOME/MKLHC` (or `~/.config/MKLHC`) on Linux. |
 | `MKLHC_DEMO` | `1` runs the scripted demo instead: no radio and no kart, for working on the screens. | `0` |
 | `MKLHC_VIDEO_DUMP` | A folder to dump the kart's raw video datagrams into, for studying the video stream (see [Dump the raw video](#dump-the-raw-video)). | Unset: no dump. |
 
 For UI work without hardware, use `MKLHC_DEMO=1` or `./gradlew :app:run --args="--demo"`; the window title then ends in
-`(demo)`. A variable set to an empty value counts as unset. A value the app cannot use (for example
-`MKLHC_RADIO=0bda-c812`) or any other argument stops it at start-up with an error that names the variable or the
-argument; the app never falls back to the demo on its own. Its first log line says what it uses, for example
-`main(): starting -> mode=radio radio=0bda:c812 radiod=<path> dataDirectory=<path>`. When `radiod` is not where the app
+`(demo)`. A variable set to an empty value counts as unset. A value the app cannot use (for example `MKLHC_DEMO=yes`)
+or any other argument stops it at start-up with an error that names the variable or the argument; the app never falls
+back to the demo on its own. `MKLHC_RADIO`, which chose the adapter in earlier versions, is no longer used: when it is
+set, the app logs a warning saying so and ignores it. Its first log line says what it uses, for example
+`main(): starting -> mode=radio radiod=<path> dataDirectory=<path>`. When `radiod` is not where the app
 looks, the log has an `ERROR` line `start(): radiod was not found, the radio stays off -> path=<path>` naming
-`MKLHC_RADIOD`, and the app stays on its no-adapter state: build `radiod` or set the variable, then start the app again.
+`MKLHC_RADIOD`, and the Radio adapter section says the radio helper is not running: build `radiod` or set the variable,
+then start the app again.
 A path may be given in double quotes (cmd's `set MKLHC_RADIOD="C:\Program Files\radiod.exe"` keeps them); the app drops
 them.
 
@@ -314,6 +318,36 @@ v1 limit: the app is configured only through these environment variables, which 
 the shell. A packaged or installed app started from the Start menu or the Finder gets no way to set them, and does not
 find `radiod` by default (it looks under `radiod/build` from its working directory, which is not the repository then).
 Run the app with `./gradlew :app:run` for now.
+
+### Choose the adapter
+
+The Radio adapter section of the Kart link screen lists every USB device `radiod` can see, hubs left out, so you can
+check that the app sees the adapter at all. Each device shows its name when it is in the
+[supported adapters](#supported-adapters) table (otherwise "Unknown USB device") and its `VID:PID`, with:
+- a support mark: **Compatible** for the adapters the app uses by itself, **Not recommended** for the ones it only uses
+  when you pick them;
+- an access mark when the app cannot open it: **Needs the WinUSB driver** (Windows: bind it with Zadig, see
+  [Bind the adapter to WinUSB](#bind-the-adapter-to-winusb-windows-one-time)), **No permission** (Linux: the udev rule),
+  **In use** (another program has it, for example a `radiod` left running by a hard kill), or **Cannot be opened**.
+  Only devices that look like a Wi-Fi adapter (a vendor-specific USB interface) are tried; the others, such as a mouse
+  or a webcam, are listed without an access mark and never opened.
+
+Two modes:
+- **Automatic** (the default) uses the first compatible adapter that opens, in the table's order of preference: the
+  Archer T3U first, then the reference RTL8812CU. It never picks a not-recommended or unknown device.
+- **Manual** uses the adapter you pick from the list (any adapter of the table, not-recommended ones included; unknown
+  devices cannot be picked). If it is unplugged or cannot be opened, the app waits for it and says why; it never falls
+  back to another adapter.
+
+In Automatic mode the adapter the app will use is marked **Will be used**; in Manual mode the picked one has its radio
+button set. The line under the list says which adapter is used (`Using <name> (<VID:PID>).`), or why none can be.
+
+The choice is kept with the pairing identity in the data directory, and can be changed only while the radio is off
+(the section says so while it is up). While the radio is off the list refreshes every 2 seconds, so plugging the
+adapter in, or binding it to WinUSB, shows up by itself, and a Start pressed while no adapter was usable goes ahead
+once one is; so does a Start that finds the adapter gone at the last moment (the screen goes back to waiting for an
+adapter instead of failing). While the radio is up the list stays as it was, with the adapter marked **In use**. Two
+identical adapters (the same `VID:PID`) cannot be told apart yet: `radiod` opens the first one it finds.
 
 ### The pairing identity
 
@@ -341,7 +375,8 @@ run. A kart paired with the old identity no longer finds the game network, and m
 2. Press **Start** on the Kart link screen to bring the radio up and beacon the game network of a kart that is already
    paired with this app, or **Pair a kart** to pair one. The radio takes a while to come up, about 50 seconds for the
    Archer T3U on Windows (see [Bringing the radio up](#bringing-the-radio-up-no-kart-needed)); the screen shows that the
-   radio is starting. If it stays on the no-adapter state instead, `radiod` is not connected: see
+   radio is starting. If it stays on the no-adapter state instead, the Radio adapter section says why (see
+   [Choose the adapter](#choose-the-adapter)); an empty list there means `radiod` is not connected: see
    [If the app does not work](#if-the-app-does-not-work).
 3. On the Pairing screen the app beacons a new pairing network once the radio is up, and shows its QR code in the
    window. Put the kart in pairing mode (front LEDs blinking) and point its camera at the window.
@@ -424,5 +459,5 @@ without the dump.
 | `launchOrNull(): cannot start radiod -> executable=<path>` | The file exists but cannot be run: it is not an executable for this system (a build for another operating system, or not a `radiod` build at all), or it lacks the execute permission on macOS or Linux (`chmod +x`). The supervisor keeps retrying with a growing delay; fix the file or `MKLHC_RADIOD` and start the app again. |
 | `radiod exited` warnings, and the app stays on its no-adapter state | `radiod` crashes at start-up. Its own output is logged under the `radiod-output` tag; on Windows, check that `libusb-1.0.dll` is next to `radiod.exe`. |
 | `the kart refused the connection to port <port> until the connect window of 5s elapsed` | The kart never started its service within the 5 seconds after the handshake. While pairing this ends the pairing (the screen shows the error; the kart keeps its old pairing): press cancel, which also takes the pairing network off the air, power cycle the kart and pair again. In a game session the app recovers on its own. |
-| `another MKLHC-App is already running with this data directory, not starting` | Another instance uses the same data directory (see above): close it. A second instance on another `MKLHC_DATA_DIR` has an identity of its own (a kart paired with the first one does not find it) and needs an adapter of its own (`MKLHC_RADIO`). |
+| `another MKLHC-App is already running with this data directory, not starting` | Another instance uses the same data directory (see above): close it. A second instance on another `MKLHC_DATA_DIR` has an identity of its own (a kart paired with the first one does not find it) and needs an adapter of its own (chosen manually on its Kart link screen). |
 | `the data directory cannot be used, not starting` | The data directory (or its parent) cannot be created or written. Fix its permissions, or set `MKLHC_DATA_DIR` to a directory you can write. |

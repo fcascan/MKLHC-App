@@ -14,6 +14,33 @@
     <string name="link_label_firmware">Firmware</string>
     <string name="link_label_battery">Battery</string>
 
+    <!-- Radio adapter -->
+    <string name="link_adapter_title">Radio adapter</string>
+    <string name="link_adapter_mode_automatic">Automatic</string>
+    <string name="link_adapter_mode_automatic_hint">Uses the first compatible adapter it finds</string>
+    <string name="link_adapter_mode_manual">Manual</string>
+    <string name="link_adapter_mode_manual_hint">Uses the adapter you pick</string>
+    <string name="link_adapter_locked_note">Changes apply when the radio is off.</string>
+    <string name="link_adapter_unknown_device">Unknown USB device</string>
+    <string name="link_adapter_pill_compatible">Compatible</string>
+    <string name="link_adapter_pill_not_recommended">Not recommended</string>
+    <string name="link_adapter_pill_in_use">In use</string>
+    <string name="link_adapter_pill_needs_driver">Needs the WinUSB driver</string>
+    <string name="link_adapter_pill_no_permission">No permission</string>
+    <string name="link_adapter_pill_cannot_open">Cannot be opened</string>
+    <string name="link_adapter_pill_will_be_used">Will be used</string>
+    <string name="link_adapter_status_scanning">Looking for USB devices…</string>
+    <string name="link_adapter_status_no_devices">No USB devices found.</string>
+    <string name="link_adapter_status_no_compatible">No compatible adapter is plugged in.</string>
+    <string name="link_adapter_status_helper_down">The radio helper is not running.</string>
+    <string name="link_adapter_status_absent">The selected adapter, %1$s (%2$s), is not plugged in.</string>
+    <string name="link_adapter_status_unsupported">The selected device is not a supported adapter.</string>
+    <string name="link_adapter_status_cannot_open_driver">%1$s cannot be opened: it needs the WinUSB driver.</string>
+    <string name="link_adapter_status_cannot_open_permission">%1$s cannot be opened: no permission to open it.</string>
+    <string name="link_adapter_status_cannot_open_busy">%1$s cannot be opened: it is in use.</string>
+    <string name="link_adapter_status_cannot_open_error">%1$s cannot be opened: unknown error.</string>
+    <string name="link_adapter_status_using">Using %1$s (%2$s).</string>
+
     <!-- Diagnostics -->
     <string name="link_diagnostics_title">Diagnostics</string>
     <string name="link_capture_label">Capture packets</string>

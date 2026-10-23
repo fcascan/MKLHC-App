@@ -1,15 +1,15 @@
 package com.mklhc.app.desktop
 
+import co.touchlab.kermit.Logger
 import com.mklhc.core.data.store.PAIRING_STORE_FILE_NAME
 import com.mklhc.core.data.store.desktopConfigDirectory
 import com.mklhc.core.data.store.desktopPairingStorePath
-import com.mklhc.core.wifi_ap.ap.RadioOptions
 import java.nio.file.Files
 import java.nio.file.InvalidPathException
 import java.nio.file.Path
 
 /*
- * How the desktop app is configured: demo or radio, the adapter, the radiod executable and the data directory.
+ * How the desktop app is configured: demo or radio, the radiod executable and the data directory.
  *
  * Original code. The radiod candidate list and its lookup moved here from the radio hardware spike
  * (app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeSession.kt), which now uses them from here; the default data
@@ -17,15 +17,15 @@ import java.nio.file.Path
  */
 
 /**
- * How the desktop app runs: the scripted demo, or the real session over the USB radio with the adapter, the radiod
- * executable and the data directory it uses.
+ * How the desktop app runs: the scripted demo, or the real session over the USB radio with the radiod executable and
+ * the data directory it uses.
  *
  * Business logic: the app is configured from the environment, so `:app:run` needs no arguments and a packaged app needs
  * no config file. Every value has a default that suits the reference setup (the paths are made absolute against the
- * working directory):
+ * working directory). The USB adapter is not configured here: the user chooses it on the Kart link screen (automatic by
+ * default), and the choice is kept with the pairing data. `MKLHC_RADIO`, which used to name it, is retired: when it is
+ * set, a warning says so at start-up and the value is ignored, whatever it is.
  *
- * - `MKLHC_RADIO`: the adapter's USB id as `vvvv:pppp` in hexadecimal; the reference adapter `0bda:c812` by default (the
- *   TP-Link Archer T3U is `2357:012d`).
  * - `MKLHC_RADIOD`: the radiod executable; by default the first radiod build found among [RADIOD_CANDIDATES] in the
  *   working directory (`:app:run` runs from the repository root, as the spike does). When none exists the path is still
  *   set (to where the build is expected), so the runtime can name it when it reports radiod missing.
@@ -37,30 +37,22 @@ import java.nio.file.Path
  *   [VideoDatagramDump]); unset by default, which dumps nothing. A diagnostic for studying the video stream.
  *
  * A variable set to a blank value counts as unset. A path in double quotes is taken without them, since cmd's
- * `set MKLHC_RADIOD="C:\Program Files\radiod.exe"` keeps the quotes in the value. A value that cannot be used (a
- * malformed USB id, a path the file system rejects, a demo flag that is neither 1 nor 0) and an unknown program argument
- * fail at start-up with a message naming the variable or the argument, instead of being ignored: a typo must not
- * silently run the radio, or the demo. A radiod path that does not exist is not a parse error; the runtime reports it
- * when it starts.
+ * `set MKLHC_RADIOD="C:\Program Files\radiod.exe"` keeps the quotes in the value. A value that cannot be used (a path
+ * the file system rejects, a demo flag that is neither 1 nor 0) and an unknown program argument fail at start-up with a
+ * message naming the variable or the argument, instead of being ignored: a typo must not silently run the radio, or the
+ * demo. A radiod path that does not exist is not a parse error; the runtime reports it when it starts.
  *
  * @property demo true for the scripted demo session.
- * @property radioVid the adapter's USB vendor id.
- * @property radioPid the adapter's USB product id.
  * @property radiodExecutable the absolute path of the radiod executable (it may not exist).
  * @property dataDirectory the absolute directory the pairing file lives in.
  * @property videoDumpDirectory the absolute folder the raw video datagrams are dumped into, or null for no dump.
  */
 data class DesktopRadioSettings(
     val demo: Boolean,
-    val radioVid: Int,
-    val radioPid: Int,
     val radiodExecutable: Path,
     val dataDirectory: Path,
     val videoDumpDirectory: Path? = null,
 ) {
-    /** The adapter's USB id as `vvvv:pppp` in lowercase hexadecimal, the form `MKLHC_RADIO` takes. */
-    val radioId: String get() = "${hex4(radioVid)}:${hex4(radioPid)}"
-
     /** The pairing file inside [dataDirectory]. */
     val pairingStorePath: Path get() = dataDirectory.resolve(PAIRING_STORE_FILE_NAME)
 
@@ -70,12 +62,14 @@ data class DesktopRadioSettings(
          * Reads the settings of this process: its environment, its system properties and [args].
          *
          * @param args the program arguments.
+         * @param log where a retired variable is reported.
          * @throws IllegalArgumentException when a value cannot be used; the message names the variable or argument.
          */
-        fun fromSystem(args: List<String>): DesktopRadioSettings = parse(
+        fun fromSystem(args: List<String>, log: Logger = Logger.withTag(TAG)): DesktopRadioSettings = parse(
             env = System.getenv(),
             systemProperties = SYSTEM_PROPERTIES_READ.associateWith { System.getProperty(it).orEmpty() },
             args = args,
+            log = log,
         )
 
         /**
@@ -91,6 +85,7 @@ data class DesktopRadioSettings(
          * @param systemProperties at least `os.name`, `user.home` and `user.dir`.
          * @param args the program arguments; `--demo` is the only one.
          * @param isRegularFile whether a radiod candidate exists; replaceable so a test can decide.
+         * @param log where a retired variable is reported; injectable so a test can assert it.
          * @throws IllegalArgumentException when a value cannot be used; the message names the variable or argument.
          */
         fun parse(
@@ -98,11 +93,14 @@ data class DesktopRadioSettings(
             systemProperties: Map<String, String>,
             args: List<String>,
             isRegularFile: (Path) -> Boolean = { Files.isRegularFile(it) },
+            log: Logger = Logger.withTag(TAG),
         ): DesktopRadioSettings {
             val osName = systemProperties[PROPERTY_OS_NAME].orEmpty()
             val workingDirectory = pathOf(systemProperties[PROPERTY_USER_DIR].orEmpty(), PROPERTY_USER_DIR).toAbsolutePath()
             val demo = demoFromArguments(args) or demoFromEnvironment(env.valueOf(ENV_DEMO))
-            val (vid, pid) = radioIdOf(env.valueOf(ENV_RADIO))
+            env.valueOf(ENV_RADIO)?.let { retired ->
+                log.w { "parse(): $ENV_RADIO is no longer used; choose the adapter on the Kart link screen -> value=$retired" }
+            }
             val radiod = env.pathValueOf(ENV_RADIOD)?.let { workingDirectory.resolve(pathOf(it, ENV_RADIOD)) }
                 ?: findRadiodExecutable(workingDirectory, isRegularFile)
                 ?: workingDirectory.resolve(expectedRadiodBuild(osName))
@@ -113,8 +111,6 @@ data class DesktopRadioSettings(
             val videoDump = env.pathValueOf(ENV_VIDEO_DUMP)?.let { workingDirectory.resolve(pathOf(it, ENV_VIDEO_DUMP)) }
             return DesktopRadioSettings(
                 demo = demo,
-                radioVid = vid,
-                radioPid = pid,
                 radiodExecutable = radiod.normalize(),
                 dataDirectory = dataDirectory.normalize(),
                 videoDumpDirectory = videoDump?.normalize(),
@@ -148,15 +144,6 @@ data class DesktopRadioSettings(
             else -> throw IllegalArgumentException("$ENV_DEMO must be 1 (demo) or 0 (radio) -> value=$value")
         }
 
-        /** `MKLHC_RADIO` as vendor and product id; the reference adapter when unset. */
-        private fun radioIdOf(value: String?): Pair<Int, Int> {
-            if (value == null) return RadioOptions.DEFAULT_VID to RadioOptions.DEFAULT_PID
-            val match = requireNotNull(USB_ID_PATTERN.matchEntire(value)) {
-                "$ENV_RADIO must be the adapter's USB id as vvvv:pppp in hexadecimal, for example 0bda:c812 -> value=$value"
-            }
-            return match.groupValues[1].toInt(HEX_RADIX) to match.groupValues[2].toInt(HEX_RADIX)
-        }
-
         /** [value] as a path, or a failure naming [source] when the file system rejects it. */
         private fun pathOf(value: String, source: String): Path = try {
             Path.of(value)
@@ -178,9 +165,10 @@ data class DesktopRadioSettings(
             return checkNotNull(Path.of(pairingFile).parent) { "the pairing file has no folder -> path=$pairingFile" }
         }
 
-        private fun hex4(value: Int): String = value.toString(HEX_RADIX).padStart(HEX4_DIGITS, '0')
-
-        /** The environment variable with the adapter's USB id. */
+        /**
+         * The retired environment variable that used to name the adapter's USB id; when set it is only reported, since
+         * the adapter is chosen on the Kart link screen.
+         */
         const val ENV_RADIO = "MKLHC_RADIO"
 
         /** The environment variable with the radiod executable. */
@@ -202,13 +190,11 @@ data class DesktopRadioSettings(
         private const val PROPERTY_USER_HOME = "user.home"
         private const val PROPERTY_USER_DIR = "user.dir"
         private const val WINDOWS_PREFIX = "windows"
+        private const val TAG = "DesktopRadioSettings"
         private const val WINDOWS_EXECUTABLE_SUFFIX = ".exe"
-        private const val HEX_RADIX = 16
-        private const val HEX4_DIGITS = 4
         private const val QUOTE = '"'
         private const val QUOTED_MIN_LENGTH = 2
         private val SYSTEM_PROPERTIES_READ = listOf(PROPERTY_OS_NAME, PROPERTY_USER_HOME, PROPERTY_USER_DIR)
-        private val USB_ID_PATTERN = Regex("([0-9a-fA-F]{4}):([0-9a-fA-F]{4})")
     }
 }
 

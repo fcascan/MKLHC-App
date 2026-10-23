@@ -6,6 +6,7 @@ import com.mklhc.core.data.identity.KartIdentity
 import com.mklhc.core.data.identity.deriveKartIdentity
 import com.mklhc.core.data.mapper.kartInfoOf
 import com.mklhc.core.data.radio.AdapterState
+import com.mklhc.core.data.radio.AdapterUnavailableException
 import com.mklhc.core.data.radio.KartRadioAp
 import com.mklhc.core.data.radio.PairingNetwork
 import com.mklhc.core.data.store.PairingStore
@@ -67,6 +68,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import kotlin.concurrent.Volatile
 import kotlin.coroutines.cancellation.CancellationException
@@ -103,6 +105,10 @@ import kotlin.time.TimeSource
  * Pairing runs the same way but first beacons the pairing network, serves the handshake with pairing on,
  * hands the kart the game-network credentials, and then falls into the session sequence; the paired kart
  * is remembered once it is identified on the game network.
+ *
+ * Adapter: both flows first wait in [LinkState.NoAdapter] until the platform reports a usable adapter. A start that
+ * then finds none (the adapter was unplugged between the platform's last look and the radio's fresh scan) goes back
+ * to that wait instead of failing the session, and goes on once the adapter is usable again.
  *
  * Departure: the kart can drop off the access point at any time (power cycled, reset after a failed step, out
  * of range), usually without closing its connections, so TCP would notice only seconds later, or never while the
@@ -408,9 +414,7 @@ class KartSessionRepository(
     private suspend fun orchestrate(startWithPairing: Boolean) {
         var localNode: NetstackNode? = null
         try {
-            awaitAdapterReady()
-            setState(LinkState.RadioStarting)
-            radioAp.start()
+            startRadioWhenAdapterUsable()
             val identity = deriveKartIdentity(pairingStore.getMasterSecret(), crypto)
             val bssid = pairingStore.getApBssid()
             localNode = NetstackNode(
@@ -467,6 +471,32 @@ class KartSessionRepository(
             setState(LinkState.Failed(fatal.message ?: "fatal error"))
         } finally {
             withContext(NonCancellable) { runCatching { localNode?.stop() } }
+        }
+    }
+
+    /**
+     * Waits for a usable adapter and starts the radio on it, as many times as it takes.
+     *
+     * Business logic: the platform's adapter state comes from its last look at the devices, and the radio resolves the
+     * adapter again from a fresh scan right before it opens it, so an adapter unplugged (or taken) in between makes
+     * the start fail with [AdapterUnavailableException]. That is not a failed session: the user only has to plug the
+     * adapter back in. So the link goes back to [LinkState.NoAdapter], the orchestrator waits for the platform to
+     * report the adapter gone (it does a moment later, from that same scan) or for [SessionConfig.adapterRetryDelay],
+     * whichever comes first, and then waits for the adapter as at the beginning. The bounded wait keeps a platform
+     * that still says READY from making a tight retry loop. Any other start failure propagates.
+     */
+    private suspend fun startRadioWhenAdapterUsable() {
+        while (true) {
+            awaitAdapterReady()
+            setState(LinkState.RadioStarting)
+            try {
+                radioAp.start()
+                return
+            } catch (unavailable: AdapterUnavailableException) {
+                log.w { "startRadioWhenAdapterUsable(): no usable adapter at the start, waiting for one again -> reason=${unavailable.reason}" }
+                setState(LinkState.NoAdapter)
+                withTimeoutOrNull(config.adapterRetryDelay) { radioAp.adapterState.first { it != AdapterState.READY } }
+            }
         }
     }
 

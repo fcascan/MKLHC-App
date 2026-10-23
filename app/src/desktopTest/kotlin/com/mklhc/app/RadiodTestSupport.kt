@@ -9,6 +9,7 @@ import com.mklhc.core.radio.RadioMessage
 import com.mklhc.core.radio.RadiodConfig
 import com.mklhc.core.radio.RadiodLauncher
 import com.mklhc.core.radio.RadiodProcess
+import com.mklhc.core.radio.UsbDeviceEntry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,9 +42,13 @@ internal class FakeRadiodLauncher : RadiodLauncher {
     @Volatile
     var initReply: RadioMessage.RadiodToApp? = RadioMessage.Ready("rtl8812cu", "fw-1", "devourer-test")
 
+    /** The USB devices a fake radiod reports in its DEVICE_LIST answer to LIST_DEVICES; none by default. */
+    @Volatile
+    var devices: List<UsbDeviceEntry> = emptyList()
+
     override fun launch(config: RadiodConfig): RadiodProcess {
         configs += config
-        return FakeRadiod(config, initReply).also { processes += it }
+        return FakeRadiod(config, initReply, deviceList = { devices }).also { processes += it }
     }
 
     /**
@@ -62,13 +67,20 @@ internal class FakeRadiodLauncher : RadiodLauncher {
 
 /**
  * The radiod side of the socket, in-process: connects to the link's Unix domain socket like the real radiod, records
- * every message it receives, answers INIT, and exits on SHUTDOWN or when the app closes the socket.
+ * every message it receives, answers INIT, answers every LIST_DEVICES with one DEVICE_LIST echoing its request id and
+ * carrying [deviceList]'s devices (read at the time of the request, so a test can plug an adapter in between scans),
+ * and exits on SHUTDOWN or when the
+ * app closes the socket.
  *
  * Like radiod (radiod/src/main.cpp, `runSession`: SHUTDOWN, EOF and a reset of the connection all return `kExitOk`) it
  * exits with 0 when it ends by itself, and with [KILLED_EXIT_CODE] when it is crashed or killed. [wasKilled] tells a
  * radiod that exited by itself from one the supervisor had to kill.
  */
-internal class FakeRadiod(private val config: RadiodConfig, private val initReply: RadioMessage.RadiodToApp?) : RadiodProcess {
+internal class FakeRadiod(
+    private val config: RadiodConfig,
+    private val initReply: RadioMessage.RadiodToApp?,
+    private val deviceList: () -> List<UsbDeviceEntry> = { emptyList() },
+) : RadiodProcess {
     val received = MutableStateFlow<List<RadioMessage>>(emptyList())
     private val exit = CompletableDeferred<Int>()
     private val channel: SocketChannel = SocketChannel.open(StandardProtocolFamily.UNIX).also {
@@ -164,6 +176,7 @@ internal class FakeRadiod(private val config: RadiodConfig, private val initRepl
                 when (message) {
                     is RadioMessage.Hello -> check(message.token == config.token) { "the session token must reach radiod" }
                     is RadioMessage.Init -> initReply?.let { send(it) }
+                    is RadioMessage.ListDevices -> send(RadioMessage.DeviceList(message.requestId, deviceList()))
                     is RadioMessage.Shutdown -> {
                         closedHere = true
                         runCatching { channel.close() }

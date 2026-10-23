@@ -7,7 +7,11 @@ import com.mklhc.core.data.capturingLogger
 import com.mklhc.core.data.hex
 import com.mklhc.core.data.identity.deriveKartIdentity
 import com.mklhc.core.data.store.InMemoryPairingStore
+import com.mklhc.core.domain.DetectedUsbDevice
 import com.mklhc.core.domain.KartNetworkKind
+import com.mklhc.core.domain.UnavailableReason
+import com.mklhc.core.domain.UsbDeviceAccess
+import com.mklhc.core.domain.UsbId
 import com.mklhc.core.netstack.EtherType
 import com.mklhc.core.netstack.LinkPayload
 import com.mklhc.core.radio.FakeRadioLink
@@ -43,6 +47,7 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -84,11 +89,11 @@ class RadioKartRadioApTest {
         assertNull(rig.start())
         assertEquals(
             listOf<RadioMessage.AppToRadiod>(
-                RadioMessage.OpenDevice(RADIO_OPTIONS.vid, RADIO_OPTIONS.pid),
+                RadioMessage.OpenDevice(ADAPTER.vid, ADAPTER.pid),
                 RadioMessage.Init(CHANNEL, RADIO_OPTIONS.bandwidthMhz, RADIO_OPTIONS.txPowerIndex),
             ),
             rig.radio.sentMessages,
-            "the radio comes up on the channel the store chose, and nothing is beaconed yet",
+            "the radio comes up on the resolved adapter and the channel the store chose, and nothing is beaconed yet",
         )
 
         assertNull(rig.start(answer = null))
@@ -488,7 +493,7 @@ class RadioKartRadioApTest {
 
         assertEquals(
             listOf<RadioMessage.AppToRadiod>(
-                RadioMessage.OpenDevice(RADIO_OPTIONS.vid, RADIO_OPTIONS.pid),
+                RadioMessage.OpenDevice(ADAPTER.vid, ADAPTER.pid),
                 RadioMessage.Init(CHANNEL, RADIO_OPTIONS.bandwidthMhz, RADIO_OPTIONS.txPowerIndex),
             ),
             rig.radio.sentMessages,
@@ -627,6 +632,7 @@ class RadioKartRadioApTest {
         connection.value = true
         runCurrent()
         assertEquals(listOf("OpenDevice", "Init", "OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertEquals(2, rig.adapters.resolveCount, "the adapter is resolved again for the radiod that replaced the first")
         assertNull(start.outcome, "only the new radiod's READY completes start")
 
         rig.radiodReady()
@@ -865,6 +871,99 @@ class RadioKartRadioApTest {
         assertTrue(rig.radio.sentMessages.isEmpty(), "nobody reacts to a reconnect once the scope is gone")
     }
 
+    // ---- the adapter ---------------------------------------------------------------------------
+
+    @Test
+    fun startResolvesTheAdapterRightBeforeTheBringUpAndReportsItInUseUntilStop() = runTest {
+        val rig = Rig(this)
+        rig.adapters.setDevices(listOf(DetectedUsbDevice(OTHER_ADAPTER, bus = 2, address = 3, access = UsbDeviceAccess.OPENABLE)))
+
+        assertNull(rig.start())
+
+        assertEquals(RadioMessage.OpenDevice(OTHER_ADAPTER.vid, OTHER_ADAPTER.pid), rig.radio.sentMessages.first())
+        assertEquals(1, rig.adapters.resolveCount)
+        assertEquals(listOf<UsbId?>(OTHER_ADAPTER), rig.adapters.activeReports, "reported once the radio is up")
+        assertTrue(rig.logs.allText().contains("start(): radio started -> channel=$CHANNEL adapter=$OTHER_ADAPTER"), rig.logs.allText())
+
+        assertNull(rig.start(answer = null))
+        assertEquals(1, rig.adapters.resolveCount, "a started radio is not resolved again")
+
+        rig.ap.stop()
+        assertEquals(listOf(OTHER_ADAPTER, null), rig.adapters.activeReports, "and reported down when it stops")
+    }
+
+    @Test
+    fun aStartWithNoUsableAdapterFailsBeforeTouchingTheRadio() = runTest {
+        val rig = Rig(this)
+        rig.adapters.setDevices(emptyList())
+
+        val failure = assertIs<AdapterUnavailableException>(rig.start(answer = null), "the reason reaches the orchestrator")
+
+        assertEquals(UnavailableReason.NO_COMPATIBLE_DEVICE, failure.reason)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "nothing is opened, and radiod is not shut down for nothing")
+        assertTrue(rig.adapters.activeReports.isEmpty(), "no resolution returned, so there is nothing to report")
+        assertTrue(rig.logs.allText().contains("start(): the radio did not come up"), rig.logs.allText())
+        assertFailsWith<IllegalStateException> { rig.ap.beacon(KartNetworkKind.GAME) }
+
+        rig.adapters.setDevices(listOf(DetectedUsbDevice(ADAPTER, bus = 1, address = 4, access = UsbDeviceAccess.OPENABLE)))
+        assertNull(rig.start(), "plugged in, the next start works")
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+    }
+
+    @Test
+    fun aBringUpThatFailsAfterTheResolutionReportsTheRadioDown() = runTest {
+        val rig = Rig(this)
+
+        assertNotNull(rig.start(answer = RadioMessage.Error(code = 10u, text = "cannot open the adapter")))
+
+        assertEquals(1, rig.adapters.resolveCount)
+        assertEquals(listOf<UsbId?>(null), rig.adapters.activeReports, "the scans resume, so the screen shows the adapter again")
+    }
+
+    @Test
+    fun aReconnectResolvesTheAdapterAgainBeforeTheReBringUp() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        rig.radio.clearSentMessages()
+        // The first adapter was unplugged while radiod was away, and the other one is there.
+        rig.adapters.setDevices(listOf(DetectedUsbDevice(OTHER_ADAPTER, bus = 2, address = 3, access = UsbDeviceAccess.OPENABLE)))
+
+        rig.relaunchRadiod(connection)
+
+        assertEquals(RadioMessage.OpenDevice(OTHER_ADAPTER.vid, OTHER_ADAPTER.pid), rig.radio.sentMessages.first())
+        assertEquals(2, rig.adapters.resolveCount)
+        rig.radiodReady()
+        assertEquals(listOf(ADAPTER, OTHER_ADAPTER), rig.adapters.activeReports)
+        assertEquals(listOf("OpenDevice", "Init", "SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName })
+    }
+
+    @Test
+    fun aReBringUpWithNoUsableAdapterIsLoggedAndTheNextReconnectTriesAgain() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
+        rig.radio.clearSentMessages()
+        rig.adapters.setDevices(emptyList())
+
+        rig.relaunchRadiod(connection)
+
+        assertTrue(rig.radio.sentMessages.isEmpty(), "nothing is opened without an adapter")
+        val failure = rig.logs.entries.single { it.severity == Severity.Error && "left for the next reconnect" in it.message }
+        assertTrue("NO_COMPATIBLE_DEVICE" in failure.message, failure.message)
+        assertEquals(listOf(ADAPTER, null), rig.adapters.activeReports, "the radio is down, so the scans resume")
+
+        rig.adapters.setDevices(listOf(DetectedUsbDevice(ADAPTER, bus = 1, address = 4, access = UsbDeviceAccess.OPENABLE)))
+        rig.relaunchRadiod(connection)
+        rig.radiodReady()
+        assertEquals(listOf("OpenDevice", "Init", "SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertContentEquals(firstStart.beacon, rig.radio.sentOfType<RadioMessage.StartBeacon>().single().beacon)
+        assertEquals(listOf(ADAPTER, null, ADAPTER), rig.adapters.activeReports)
+    }
+
     // ---- platform seams ------------------------------------------------------------------------
 
     @Test
@@ -1019,11 +1118,13 @@ class RadioKartRadioApTest {
             log = capturingLogger(logs, "RadioAccessPoint"),
             timeSource = test.testScheduler.timeSource,
         )
+        val adapters = FakeUsbAdapterRepository()
         val ap = RadioKartRadioAp(
             accessPoint = accessPoint,
             pairingStore = store,
             scope = scope,
             adapterState = adapterState,
+            adapterRepository = adapters,
             awaitRadioConnected = awaitRadioConnected,
             radioConnection = radioConnection,
             onRequestAdapterPermission = onRequestAdapterPermission,
@@ -1109,6 +1210,10 @@ class RadioKartRadioApTest {
     private companion object {
         val READY = RadioMessage.Ready("rtl8812cu", "fw-1", "devourer-test")
         val RADIO_OPTIONS = RadioOptions()
+
+        // What the fake adapter repository resolves by default, and another compatible adapter.
+        val ADAPTER: UsbId = FakeUsbAdapterRepository.DEFAULT_ADAPTER
+        val OTHER_ADAPTER = UsbId(0x0BDA, 0xC812)
 
         val MASTER_SECRET = ByteArray(32) { (it + 7).toByte() }
         val SEED = ByteArray(0x10) { (it + 1).toByte() }

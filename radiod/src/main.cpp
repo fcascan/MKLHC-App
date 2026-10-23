@@ -10,8 +10,9 @@
  * and radiod CONNECTS to <path>. The app speaks first: its DesktopRadioLink sends HELLO
  * (protocol version + token) as soon as radiod connects, and radiod verifies both against its own
  * protocol version and --token before it accepts any command. Then radiod dispatches commands to
- * Radio and streams RX_FRAME, STATUS (about once a second), LOG and ERROR back. devourer's own log
- * output is captured through a pipe and forwarded as LOG messages.
+ * Radio and streams RX_FRAME, STATUS (about once a second), LOG and ERROR back. LIST_DEVICES is
+ * answered here, with one DEVICE_LIST from a USB scan independent of the Radio (UsbScan.h). devourer's
+ * own log output is captured through a pipe and forwarded as LOG messages.
  *
  * Exit codes: 0 clean (SHUTDOWN, app closed the socket, SIGINT/SIGTERM), 1 usage, 2 connect or
  * handshake failure, 3 fatal radio error (an ERROR was sent first), 4 unexpected exception.
@@ -53,6 +54,7 @@
 
 #include "Ipc.h"
 #include "Radio.h"
+#include "UsbScan.h"
 
 #ifndef RADIOD_DEVOURER_VERSION
 #define RADIOD_DEVOURER_VERSION "unknown"
@@ -602,8 +604,11 @@ bool performHandshake(Socket s, Sender& sender, const std::string& expectedToken
     return true;
 }
 
-/** Applies one command to [radio]; reports a failure to the app. Returns false when the session should end. */
-bool dispatch(const ipc::Message& message, Radio& radio, Sender& sender) {
+/**
+ * Applies one command to [radio] (or, for LIST_DEVICES, to [scanner]); reports a failure to the app. Returns false
+ * when the session should end.
+ */
+bool dispatch(const ipc::Message& message, Radio& radio, radiod::UsbScanner& scanner, Sender& sender) {
     auto report = [&](const radiod::Failure& failure) {
         if (failure) {
             sendError(sender, failure->code, failure->text);
@@ -624,6 +629,14 @@ bool dispatch(const ipc::Message& message, Radio& radio, Sender& sender) {
         report(radio.stopBeacon());
     } else if (const auto* tx = std::get_if<ipc::TxFrame>(&message)) {
         report(radio.txFrame(tx->rate, tx->retryLimit, tx->flags, tx->frame));
+    } else if (const auto* list = std::get_if<ipc::ListDevices>(&message)) {
+        // Never fatal: a failed scan still answers, with an empty list, so the app never waits in vain. No log
+        // line per scan: the app scans about every 2 s, and the scanner warns only when its problems change.
+        radiod::UsbScanResult scan = scanner.scan();
+        if (!scan.warning.empty()) {
+            logLocal(ipc::kLogWarn, scan.warning);
+        }
+        sender.send(ipc::DeviceList{list->requestId, std::move(scan.devices)});
     } else if (std::holds_alternative<ipc::Shutdown>(message)) {
         return false;
     } else if (std::holds_alternative<ipc::Hello>(message)) {
@@ -637,6 +650,7 @@ bool dispatch(const ipc::Message& message, Radio& radio, Sender& sender) {
 
 /** Serves the connection until SHUTDOWN, EOF, a signal or a fatal error; returns the exit code. */
 int runSession(Socket s, Radio& radio, Sender& sender) {
+    radiod::UsbScanner scanner;
     auto lastStatus = std::chrono::steady_clock::now();
     for (;;) {
         if (g_stopRequested != 0) {
@@ -668,7 +682,7 @@ int runSession(Socket s, Radio& radio, Sender& sender) {
         std::string why;
         switch (readMessage(s, message, why)) {
             case ReadResult::Ok:
-                if (!dispatch(message, radio, sender)) {
+                if (!dispatch(message, radio, scanner, sender)) {
                     return kExitOk;
                 }
                 break;

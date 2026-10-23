@@ -5,6 +5,7 @@ import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.data.identity.deriveKartIdentity
 import com.mklhc.core.data.store.PairingStore
 import com.mklhc.core.domain.KartNetworkKind
+import com.mklhc.core.domain.UsbId
 import com.mklhc.core.netstack.FrameLink
 import com.mklhc.core.wifi_ap.ap.ApConfig
 import com.mklhc.core.wifi_ap.ap.RadioAccessPoint
@@ -41,13 +42,10 @@ import kotlin.coroutines.cancellation.CancellationException
  * Business logic: the orchestrator only names a [KartNetworkKind]; this class owns the credentials behind it.
  *
  * - [start] waits for the platform to report the radio helper reachable, subscribes the [RadioAccessPoint] to the
- *   radio and brings the radio up on the channel the [PairingStore] chose (the one channel every network of this
- *   installation uses). It is idempotent, and when the radio does not come up the access point is shut down again so
- *   a retry starts clean. When the platform passes a [radioConnection], the bring-up races radiod disconnecting: a
- *   radiod that goes away during it (a crash in its ~50 s INIT, or the radiod of a [stop] that is still connected
- *   while it shuts down) never sends READY, so instead of waiting out the READY timeout [start] waits for radiod to
- *   be connected again and brings the radio up once more on the new radiod, which knows nothing of the first
- *   OPEN_DEVICE and INIT. A second disconnect fails [start].
+ *   radio and brings the radio up, on the adapter the [UsbAdapterRepository] resolves, on the channel the
+ *   [PairingStore] chose (the one channel every network of this installation uses); see [bringUpForStart] for the
+ *   adapter and for a radiod that goes away during the bring-up. It is idempotent, and when the radio does not come up
+ *   the access point is shut down again so a retry starts clean.
  * - [beacon] stands up one network. The game network takes its SSID and pre-shared key from the installation identity
  *   (`deriveKartIdentity` over the master secret) and a time-based LP2P nonce, because it is the persistent network.
  *   The pairing network takes the SSID the QR code shows, the key `SHA-256(seed)` and a random nonce, because it is a
@@ -62,8 +60,8 @@ import kotlin.coroutines.cancellation.CancellationException
  * - A radio helper relaunched underneath a started radio (the desktop supervisor restarts radiod after a crash) is
  *   idle: nothing opens the adapter, sets the identity or starts the beacon, and [start] and a repeated `beacon(GAME)`
  *   would answer from the state recorded here and change nothing. So, when the platform passes a [radioConnection],
- *   a watcher reacts to its false-to-true change while the radio is started: under the lifecycle lock it brings the
- *   radio up again on the same channel and, when a network was served, serves it again with the very same [ApConfig]
+ *   a watcher reacts to its false-to-true change while the radio is started: under the lifecycle lock it resolves the
+ *   adapter again, brings the radio up again on the same channel and, when a network was served, serves it again with the very same [ApConfig]
  *   (same SSID, keys and nonce, so the kart joins again with what it holds; rebuilding it would draw a new game nonce
  *   and so a new key). Bringing the radio up drops the associated station, so the orchestrator sees a departure and
  *   recovers as for any other. A started radio that beaconed nothing is only brought up. A failure is logged at error
@@ -82,8 +80,9 @@ import kotlin.coroutines.cancellation.CancellationException
  * Threading: one [Mutex] serialises [start], [stop], [beacon] and the re-bring-up after a reconnect. The nonce table is
  * not thread-safe, and a beacon request must never interleave with a start or a stop. A re-bring-up holds the lock
  * for as long as radiod takes to report READY (like [start]), so [stop] ends it first instead of waiting behind it,
- * and a disconnect that arrives meanwhile ends it too. [start] holds it through its bring-up, including the wait for
- * radiod to come back after a disconnect; cancelling its caller ends that wait. Everything else is as safe as the
+ * and a disconnect that arrives meanwhile ends it too. [start] holds it through its bring-up, including the adapter's
+ * scan (a few seconds at most) and the wait for radiod to come back after a disconnect; cancelling its caller ends
+ * that wait. Everything else is as safe as the
  * layers underneath.
  *
  * Secrets: the pairing seed, the pre-shared keys, the CCMP keys and the master secret are never logged.
@@ -93,8 +92,10 @@ import kotlin.coroutines.cancellation.CancellationException
  * @param pairingStore where the master secret, the BSSID and the channel come from.
  * @param scope the scope the access point's radio collectors and the reconnect watcher run in; give it the same
  *   single-threaded scope as the orchestrator. The watcher ends when the scope ends.
- * @param adapterState what the platform says about the adapter (on desktop: whether radiod is connected; on Android
- *   the USB permission, in Phase 2).
+ * @param adapterState what the platform says about the adapter (on desktop: whether radiod is connected and an adapter
+ *   resolves; on Android the USB permission, in Phase 2).
+ * @param adapterRepository which adapter to open: resolved right before every bring-up (the first, the one after a
+ *   disconnect during [start], and the redo after a reconnect), and told which adapter the radio holds.
  * @param awaitRadioConnected suspends until the radio helper can be reached; [start] calls it before touching the
  *   radio, and again when radiod disconnected during its bring-up. Null (the default) derives it from
  *   [radioConnection]: it waits until the connection is true, or returns at once when there is no connection signal.
@@ -116,6 +117,7 @@ class RadioKartRadioAp(
     private val pairingStore: PairingStore,
     private val scope: CoroutineScope,
     override val adapterState: StateFlow<AdapterState>,
+    private val adapterRepository: UsbAdapterRepository,
     private val awaitRadioConnected: (suspend () -> Unit)? = null,
     private val radioConnection: StateFlow<Boolean>? = null,
     private val onRequestAdapterPermission: () -> Unit = {},
@@ -179,14 +181,22 @@ class RadioKartRadioAp(
                 return
             }
             awaitConnection()
-            accessPoint.start(scope)
             var started = false
+            var accessPointStarted = false
+            var adapterResolved = false
             try {
                 val channel = pairingStore.getChannel()
-                bringUpForStart(channel)
+                // Before the access point starts: with no usable adapter nothing is opened, and radiod is not sent a
+                // SHUTDOWN (which would end it) for a radio it never brought up.
+                val firstAdapter = adapterRepository.resolveForBringUp()
+                adapterResolved = true
+                accessPoint.start(scope)
+                accessPointStarted = true
+                val adapter = bringUpForStart(channel, firstAdapter)
                 startedChannel = channel
                 started = true
-                log.i { "start(): radio started -> channel=$channel" }
+                adapterRepository.radioActive(adapter)
+                log.i { "start(): radio started -> channel=$channel adapter=$adapter" }
                 launchReconnectWatcher()
             } catch (failure: Throwable) {
                 // Only reported here and rethrown. A cancellation is not a failure of the radio: it is cleaned up
@@ -197,8 +207,12 @@ class RadioKartRadioAp(
                 throw failure
             } finally {
                 // Whatever ended the attempt (a failure, a cancellation, an Error), a half-started access point would
-                // keep its collectors and make the next start() fail with "already started".
-                if (!started) stopAccessPoint("start()")
+                // keep its collectors and make the next start() fail with "already started", and the repository
+                // would keep its scans paused for an adapter the radio never opened.
+                if (!started) {
+                    if (accessPointStarted) stopAccessPoint("start()")
+                    if (adapterResolved) adapterRepository.radioActive(null)
+                }
             }
         }
     }
@@ -217,9 +231,11 @@ class RadioKartRadioAp(
             connectionWatcher?.cancel()
             connectionWatcher = null
             stopAccessPoint("stop()")
+            val wasStarted = startedChannel != null
             startedChannel = null
             served = null
             interrupted = null
+            if (wasStarted) adapterRepository.radioActive(null)
         }
     }
 
@@ -274,37 +290,49 @@ class RadioKartRadioAp(
     }
 
     /**
-     * Brings the radio up on [channel] for [start]; call with [lifecycleLock] held, after `accessPoint.start`.
+     * Brings the radio up on [channel] for [start], with [firstAdapter] first, and returns the adapter it came up on;
+     * call with [lifecycleLock] held, after `accessPoint.start`.
      *
-     * Business logic: without a [radioConnection] this is one bring-up. With one, the bring-up races radiod
-     * disconnecting ([bringUpUnlessDisconnected]), because a radiod that is gone never sends READY and the bring-up
-     * would wait out its whole READY timeout (two minutes) for nothing, after which the orchestrator gives up. On a
-     * disconnect the bring-up is abandoned, [awaitConnection] waits for radiod to be connected again, and the radio is
-     * brought up once more from OPEN_DEVICE on: the relaunched radiod knows nothing of the first commands. A second
-     * disconnect fails with an IllegalStateException, so a radiod that keeps crashing is reported instead of chased;
-     * any other failure fails at once, and cancellation propagates.
+     * Business logic: the adapter. [start] asks the [UsbAdapterRepository] for [firstAdapter] before the access point
+     * starts (a fresh scan resolved against the user's choice), so with no usable adapter it fails with
+     * [AdapterUnavailableException] before touching the radio, and radiod is not sent a SHUTDOWN for nothing. Once the
+     * radio is up, [start] tells the repository which adapter the radio holds; it tells it the radio holds none when a
+     * bring-up fails and when [stop] runs, so the repository never scans a device radiod has open.
+     *
+     * Without a [radioConnection] this is one bring-up. With one, the bring-up races radiod disconnecting
+     * ([bringUpUnlessDisconnected]): a radiod that goes away during it (a crash in its ~50 s INIT, or the radiod of a
+     * [stop] that is still connected while it shuts down) never sends READY, and the bring-up would wait out its whole
+     * READY timeout (two minutes) for nothing, after which the orchestrator gives up. On a disconnect the bring-up is
+     * abandoned, [awaitConnection] waits for radiod to be connected again, the adapter is
+     * resolved again (the new radiod scans afresh) and the radio is brought up once more from OPEN_DEVICE on: the
+     * relaunched radiod knows nothing of the first commands. A second disconnect fails with an IllegalStateException, so
+     * a radiod that keeps crashing is reported instead of chased; any other failure (an [AdapterUnavailableException]
+     * included) fails at once, and cancellation propagates.
      */
-    private suspend fun bringUpForStart(channel: Int) {
+    private suspend fun bringUpForStart(channel: Int, firstAdapter: UsbId): UsbId {
         val connection = radioConnection
         if (connection == null) {
-            accessPoint.bringUp(channel)
-            return
+            accessPoint.bringUp(channel, firstAdapter)
+            return firstAdapter
         }
+        var adapter = firstAdapter
         var attempt = 1
-        while (!bringUpUnlessDisconnected(connection, channel)) {
+        while (!bringUpUnlessDisconnected(connection, channel, adapter)) {
             check(attempt < START_BRING_UP_ATTEMPTS) {
                 "start(): radiod disconnected again during the bring-up, giving up -> channel=$channel attempts=$attempt"
             }
             log.w { "start(): radiod disconnected during the bring-up, waiting for it to reconnect -> channel=$channel attempt=$attempt" }
             awaitConnection()
             attempt++
-            log.i { "start(): radiod connected again, bringing the radio up on it -> channel=$channel attempt=$attempt" }
+            adapter = adapterRepository.resolveForBringUp()
+            log.i { "start(): radiod connected again, bringing the radio up on it -> channel=$channel adapter=$adapter attempt=$attempt" }
         }
+        return adapter
     }
 
     /**
-     * Runs one bring-up on [channel] unless radiod disconnects first: true when the radio came up, false when
-     * [connection] dropped (the bring-up is then abandoned, and the access point recorded nothing).
+     * Runs one bring-up on [channel] with [adapter] unless radiod disconnects first: true when the radio came up, false
+     * when [connection] dropped (the bring-up is then abandoned, and the access point recorded nothing).
      *
      * Business logic: the disconnect watcher subscribes before the bring-up sends anything, so a drop at any moment
      * after the bring-up began is seen, and a connection already down counts at once (a StateFlow replays its value).
@@ -313,14 +341,14 @@ class RadioKartRadioAp(
      * first by a command radiod could no longer take ("radiod is not connected"). Any other failure, and cancellation,
      * propagate.
      */
-    private suspend fun bringUpUnlessDisconnected(connection: StateFlow<Boolean>, channel: Int): Boolean =
+    private suspend fun bringUpUnlessDisconnected(connection: StateFlow<Boolean>, channel: Int, adapter: UsbId): Boolean =
         try {
             coroutineScope {
                 val disconnectWatcher = launch(start = CoroutineStart.UNDISPATCHED) {
                     connection.first { connected -> !connected }
                     throw RadiodDisconnectedException()
                 }
-                accessPoint.bringUp(channel)
+                accessPoint.bringUp(channel, adapter)
                 disconnectWatcher.cancel()
             }
             true
@@ -364,13 +392,16 @@ class RadioKartRadioAp(
     }
 
     /**
-     * Brings the radio up again after radiod reconnected, and serves again the network that was served. A failure is
-     * logged at error and left for the next reconnect; cancellation propagates.
+     * Brings the radio up again after radiod reconnected, on the adapter resolved afresh, and serves again the network
+     * that was served. A failure (no usable adapter included) is logged at error, reported to the adapter repository as
+     * a radio that is down, and left for the next reconnect; cancellation propagates.
      *
      * Business logic: the access point drops the network when it brings the radio up (and with it the associated
      * station), so the bookkeeping moves the served network to [interrupted] first and gives it back only once it is
-     * served again. The [ApConfig] it was served with is reused, not rebuilt: same keys, so the kart can rejoin. Runs
-     * under the lifecycle lock; [stop] being called, or radiod disconnecting again, cancels it.
+     * served again. The [ApConfig] it was served with is reused, not rebuilt: same keys, so the kart can rejoin. The
+     * adapter is resolved again because the new radiod is a new chance: the adapter may have been unplugged, or another
+     * plugged in, while radiod was away. Runs under the lifecycle lock; [stop] being called, or radiod disconnecting
+     * again, cancels it.
      */
     private suspend fun redoBringUpAfterReconnect() {
         try {
@@ -387,17 +418,22 @@ class RadioKartRadioAp(
                     "redoBringUpAfterReconnect(): radiod is connected again, bringing the radio up again -> " +
                         "channel=$channel network=${resume?.kind}"
                 }
-                accessPoint.bringUp(channel)
+                val adapter = adapterRepository.resolveForBringUp()
+                accessPoint.bringUp(channel, adapter)
                 if (resume != null) {
                     accessPoint.serve(resume.config)
                     served = resume
                     interrupted = null
                 }
-                log.i { "redoBringUpAfterReconnect(): radio up again -> channel=$channel network=${resume?.kind}" }
+                adapterRepository.radioActive(adapter)
+                log.i { "redoBringUpAfterReconnect(): radio up again -> channel=$channel adapter=$adapter network=${resume?.kind}" }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
+            // The radio is off the air until the next reconnect: the repository may scan again meanwhile, so the screen
+            // shows what is plugged in.
+            adapterRepository.radioActive(null)
             log.e(failure) {
                 "redoBringUpAfterReconnect(): the radio did not come up again, left for the next reconnect -> message=${failure.message}"
             }

@@ -4,11 +4,14 @@ import co.touchlab.kermit.Logger
 import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.data.radio.AdapterState
 import com.mklhc.core.data.radio.RadioKartRadioAp
+import com.mklhc.core.data.radio.RadiodUsbAdapterRepository
+import com.mklhc.core.data.radio.UsbAdapterRepository
 import com.mklhc.core.data.session.KartSession
 import com.mklhc.core.data.session.KartSessionRepository
 import com.mklhc.core.data.store.DataStorePairingStore
 import com.mklhc.core.data.store.PairingStore
 import com.mklhc.core.data.store.createPairingDataStore
+import com.mklhc.core.domain.AdapterResolution
 import com.mklhc.core.radio.DesktopRadioLink
 import com.mklhc.core.radio.ProcessRadiodLauncher
 import com.mklhc.core.radio.RadiodConfig
@@ -26,8 +29,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -55,14 +58,18 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * - Construction wires everything and starts nothing: the socket's temporary directory is created (radiod's AF_UNIX
  *   path must stay short), a random token is drawn for radiod's HELLO, and the radio link, the radiod supervisor, the
- *   access point over the link (opening the adapter of [DesktopRadioSettings.radioId]), the pairing store in the data
- *   directory, the radio unit and the [KartSessionRepository] are built on it. The app creates and locks the data
+ *   access point over the link, the pairing store in the data directory, the USB adapter repository ([adapters]), the
+ *   radio unit and the [KartSessionRepository] are built on it. The app creates and locks the data
  *   directory before building the runtime (see [DesktopDataDirectory]), so one runtime at a time uses it. When
  *   [DesktopRadioSettings.videoDumpDirectory] is set, a [VideoDatagramDump] is opened there and the session hands it
  *   every video datagram; a folder that cannot be used is logged at error and the app runs without the dump.
- * - The adapter is "ready" while radiod is connected and "absent" otherwise, so the UI shows the no-adapter state until
- *   radiod is up (and for good when radiod is missing). The radio unit waits for the connection before it brings the
- *   radio up, and brings it up again (same network, same keys) when the supervisor has relaunched radiod after a crash.
+ * - [adapters] lists the USB devices radiod sees (a scan when radiod connects, then every 2 s while the radio is down)
+ *   and resolves the user's choice (automatic by default, persisted in the pairing file). The adapter is "ready" while
+ *   radiod is connected and an adapter resolves, and "absent" otherwise, so the UI shows the no-adapter state until
+ *   radiod is up and a usable adapter is plugged in (and for good when radiod is missing); a Start that waits there
+ *   goes on by itself once the adapter shows up. The radio unit waits for the connection, resolves the adapter afresh
+ *   before every bring-up, and brings the radio up again (same network, same keys) when the supervisor has relaunched
+ *   radiod after a crash.
  * - [start] listens on the socket and starts the supervisor, which launches radiod and relaunches it when it dies. A
  *   missing radiod executable is logged at error with its path and the variable that sets it, and the radio stays
  *   off; the demo is never used instead. The session itself starts when the UI asks for it (Start, or the Pairing
@@ -74,16 +81,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   supervisor to see radiod exit and stops it before its restart backoff can launch radiod again, cancels everything
  *   this class started, releases the pairing file, removes the socket and its directory, and closes the video dump.
  *
- * Threading: everything that touches the access point, the network stack or the session repository runs on the
- * runtime's dispatcher, `Dispatchers.Default.limitedParallelism(1)`, as those classes require: one task at a time, in
- * order, each seeing what the previous ones wrote, though not always on the same pool thread. [session] moves the UI's
- * commands onto it.
+ * Threading: everything that touches the access point, the network stack, the adapter scans or the session repository
+ * runs on the runtime's dispatcher, `Dispatchers.Default.limitedParallelism(1)`, as those classes require: one task at
+ * a time, in order, each seeing what the previous ones wrote, though not always on the same pool thread. [session]
+ * moves the UI's commands onto it; [adapters] is safe from any coroutine.
  *
  * Secrets: the token travels on radiod's command line and in HELLO only; it, the master secret and the network keys are
  * never logged. The pairing file holds the master secret in the clear, in the data directory (see
  * [DataStorePairingStore]), which the app creates readable by its owner only on macOS and Linux.
  *
- * @param settings the adapter, the radiod executable and the data directory.
+ * @param settings the radiod executable, the data directory and the video dump folder.
  * @param launcher how radiod is started; replaceable so a test can run a fake radiod in-process.
  * @param crypto the crypto provider for the token, the identity, the keys and the RCD handshake.
  * @param clock Unix time in seconds, for the session's timestamps.
@@ -121,10 +128,19 @@ class DesktopKartRuntime(
         crypto = crypto,
     )
 
-    // READY while radiod is connected: on the desktop the adapter is reachable exactly when radiod is.
-    private val adapterState: StateFlow<AdapterState> = link.connected
-        .map { connected -> if (connected) AdapterState.READY else AdapterState.ABSENT }
-        .stateIn(scope, SharingStarted.Eagerly, AdapterState.ABSENT)
+    /** The USB devices radiod sees, the user's choice among them and the adapter the radio opens; the screen binds it. */
+    val adapters: UsbAdapterRepository = RadiodUsbAdapterRepository(
+        link = link,
+        store = pairingStore,
+        scope = scope,
+        radiodConnected = link.connected,
+    )
+
+    // READY while radiod is connected and an adapter resolves: the session waits in NoAdapter until one is usable, and
+    // goes on by itself when one is plugged in (the repository scans every 2 s while the radio is down).
+    private val adapterState: StateFlow<AdapterState> = combine(link.connected, adapters.overview) { connected, overview ->
+        if (connected && overview.resolution is AdapterResolution.Use) AdapterState.READY else AdapterState.ABSENT
+    }.stateIn(scope, SharingStarted.Eagerly, AdapterState.ABSENT)
 
     // Opened with the runtime when MKLHC_VIDEO_DUMP names a folder; one that cannot be used leaves the dump off.
     private val videoDump: VideoDatagramDump? = settings.videoDumpDirectory?.let(::openVideoDumpOrNull)
@@ -133,12 +149,13 @@ class DesktopKartRuntime(
         radioAp = RadioKartRadioAp(
             accessPoint = RadioAccessPoint(
                 radio = link,
-                options = RadioOptions(vid = settings.radioVid, pid = settings.radioPid),
+                options = RadioOptions(),
                 primitives = crypto,
             ),
             pairingStore = pairingStore,
             scope = scope,
             adapterState = adapterState,
+            adapterRepository = adapters,
             awaitRadioConnected = { link.connected.first { it } },
             radioConnection = link.connected,
             crypto = crypto,
@@ -196,7 +213,7 @@ class DesktopKartRuntime(
         }
         supervisor.start()
         supervising = true
-        log.i { "start(): supervising radiod -> radio=${settings.radioId} radiod=$radiod" }
+        log.i { "start(): supervising radiod -> radiod=$radiod" }
     }
 
     /**

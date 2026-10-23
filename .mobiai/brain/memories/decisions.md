@@ -449,3 +449,36 @@ One mouse cannot steer and throttle at once, so the desktop could not really dri
 - feature/cockpit/presentation/src/commonMain/kotlin/com/mklhc/feature/cockpit/presentation/KeyboardDrive.kt
 - feature/cockpit/presentation/src/commonMain/kotlin/com/mklhc/feature/cockpit/presentation/CockpitScreen.kt
 - docs/HARDWARE_SETUP.md
+
+## The USB adapter is detected and chosen on the Kart link screen; MKLHC_RADIO is retired
+
+- id: usb-adapter-detected-and-chosen-on-link-screen-20261023
+- type: decision
+- status: active
+- platform: kmp
+- area: radio
+- date: 2026-10-23
+
+### Decision
+radiod protocol 2 adds LIST_DEVICES (0x000A, u32 request id) / DEVICE_LIST (0x0106, the echoed id, then the devices): radiod enumerates with its own temporary libusb context, skips hubs, and reports per device vid, pid, bus, address, class and an access code from a trial open with no claim (OPENABLE, DRIVER_UNSUPPORTED = not bound to WinUSB on Windows, ACCESS_DENIED, BUSY, ERROR, NOT_PROBED); only devices with a vendor-specific (0xFF) interface are trial-opened, the others are NOT_PROBED (no autosuspend wake-ups, no exclusive WinUSB grabs of unrelated devices every 2 s); on Windows LIBUSB_ERROR_ACCESS from an open means another handle holds the WinUSB device, so it is reported as BUSY; never fatal; a late reply to a timed-out request is ignored by its id. `UsbAdapterCatalog` (core/domain, shared with Android) lists the known adapters in preference order: 2357:012d Archer T3U and 0bda:c812 (COMPATIBLE), 0bda:c811 and 0bda:8812 (NOT_RECOMMENDED). `AdapterSelection` Automatic (default; first compatible openable adapter, never a not-recommended or unknown one) or Manual(id) (any catalog adapter; never substituted), persisted in the pairing store (`adapter_selection`). `RadiodUsbAdapterRepository` scans when radiod connects, every 2 s while the radio does not hold the adapter, and right before every bring-up (one mutex: DEVICE_LIST has no request id); desktop `adapterState` is READY only when radiod is connected and the resolution is Use, so a Start waiting with no usable adapter proceeds when one is plugged in. The Kart link screen lists every detected device with support and access marks and the Automatic/Manual choice, which can be changed only while the radio is off; the repository's `radioActive(adapter)` pauses the scans and marks that adapter in use (`AdapterOverview.inUse`), since its own scan would report it busy. A Manual id outside the catalog (a hand-edited store) resolves to SELECTED_DEVICE_NOT_SUPPORTED. `MKLHC_RADIO` is ignored with a start-up warning; the spike keeps `--vid/--pid`.
+
+### Reason
+On 2026-10-23 the app was started from Android Studio without MKLHC_RADIO and tried the default 0bda:c812 while the T3U was plugged in and healthy; nothing in the app knew which devices were present, and "no adapter" only meant "radiod not connected". The author asked to see every detected device (to tell whether the app sees the adapter at all), with the compatible ones marked, and both automatic and manual selection.
+
+### Verified
+Unit and screen tests (domain resolver, codec round trips both ways, repository scan scheduling, bring-up resolution, desktop runtime staying NoAdapter until an adapter appears, link screen). radiod builds with protocol 2. Not yet run on hardware.
+
+### Files
+- radiod/src/UsbScan.cpp, radiod/src/Ipc.h, radiod/src/Ipc.cpp, radiod/src/main.cpp
+- core/radio/src/commonMain/kotlin/com/mklhc/core/radio/IpcCodec.kt
+- core/domain/src/commonMain/kotlin/com/mklhc/core/domain/UsbAdapterCatalog.kt
+- core/domain/src/commonMain/kotlin/com/mklhc/core/domain/AdapterResolver.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/RadiodUsbAdapterRepository.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/RadioKartRadioAp.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/store/DataStorePairingStore.kt
+- core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopKartRuntime.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopRadioSettings.kt
+- feature/link/presentation/src/commonMain/kotlin/com/mklhc/feature/link/presentation/AdapterSectionUi.kt
+- feature/link/presentation/src/commonMain/kotlin/com/mklhc/feature/link/presentation/LinkScreen.kt
+- docs/HARDWARE_SETUP.md

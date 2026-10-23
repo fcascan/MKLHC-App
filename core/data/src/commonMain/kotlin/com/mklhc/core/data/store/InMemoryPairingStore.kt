@@ -2,6 +2,7 @@ package com.mklhc.core.data.store
 
 import co.touchlab.kermit.Logger
 import com.mklhc.core.crypto.CryptoPrimitives
+import com.mklhc.core.domain.AdapterSelection
 import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.PairedKart
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +28,7 @@ import kotlinx.coroutines.sync.withLock
  * @param channel optional seed for the channel (one of [PairingStore.ALLOWED_CHANNELS]).
  * @param pairedKart optional seed for the paired kart.
  * @param settings the initial settings.
+ * @param adapterSelection the initial USB adapter selection.
  * @param log where first-run generation is logged.
  * @throws IllegalArgumentException if a seed is malformed.
  */
@@ -37,6 +39,7 @@ class InMemoryPairingStore(
     channel: Int? = null,
     pairedKart: PairedKart? = null,
     settings: KartSettings = KartSettings.DEFAULT,
+    adapterSelection: AdapterSelection = AdapterSelection.Automatic,
     private val log: Logger = Logger.withTag(TAG),
 ) : PairingStore {
 
@@ -54,6 +57,7 @@ class InMemoryPairingStore(
     }
     private var pairedKartValue: PairedKart? = pairedKart
     private val settingsState = MutableStateFlow(settings)
+    private val adapterSelectionState = MutableStateFlow(adapterSelection)
 
     override suspend fun getMasterSecret(): ByteArray = lock.withLock {
         val existing = masterSecretBytes
@@ -94,6 +98,15 @@ class InMemoryPairingStore(
     }
 
     override fun observeSettings(): Flow<KartSettings> = settingsState.asStateFlow()
+
+    override suspend fun getAdapterSelection(): AdapterSelection = adapterSelectionState.value
+
+    override suspend fun setAdapterSelection(selection: AdapterSelection) {
+        adapterSelectionState.value = selection
+        log.i { "setAdapterSelection(): updated -> selection=${selection.toStoredText()}" }
+    }
+
+    override fun observeAdapterSelection(): Flow<AdapterSelection> = adapterSelectionState.asStateFlow()
 
     private companion object {
         const val TAG = "InMemoryPairingStore"

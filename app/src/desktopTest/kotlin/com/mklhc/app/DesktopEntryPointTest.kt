@@ -2,6 +2,8 @@ package com.mklhc.app
 
 import co.touchlab.kermit.Logger
 import com.mklhc.app.di.appKoinModules
+import com.mklhc.core.data.radio.FakeUsbAdapterRepository
+import com.mklhc.core.data.radio.UsbAdapterRepository
 import com.mklhc.core.data.session.FakeKartSession
 import com.mklhc.core.data.session.KartSession
 import com.mklhc.core.domain.LinkState
@@ -56,11 +58,13 @@ class DesktopEntryPointTest {
     // ---- The session binding -------------------------------------------------------------------------
 
     @Test
-    fun theDesktopSessionModuleOverridesTheDemoSessionForEveryScreen() {
+    fun theDesktopSessionModuleOverridesTheDemoSessionAndAdaptersForEveryScreen() {
         val real = FakeKartSession()
-        val koin = koinApplication { modules(appKoinModules() + desktopSessionModule(real)) }.koin
+        val adapters = FakeUsbAdapterRepository()
+        val koin = koinApplication { modules(appKoinModules() + desktopSessionModule(real, adapters)) }.koin
 
         assertSame(real, koin.get<KartSession>())
+        assertSame(adapters, koin.get<UsbAdapterRepository>(), "the screen lists radiod's devices, not the demo's")
         val viewModel = koin.get<LinkViewModel>()
         real.setLinkState(LinkState.KartReady)
         assertEquals(LinkState.KartReady, viewModel.state.value.linkState, "the screen follows the bound session")

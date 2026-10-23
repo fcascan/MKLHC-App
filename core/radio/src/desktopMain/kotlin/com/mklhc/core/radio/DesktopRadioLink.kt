@@ -38,7 +38,7 @@ import java.nio.file.Path
  * [RadiodSupervisor] spawns radiod with that path and the session [token]. For every accepted
  * connection the link first sends HELLO with the protocol version and token, then frames commands
  * and decodes radiod's messages with [IpcCodec] on IO dispatchers: RX_FRAME goes to [rxFrames],
- * READY/STATUS/ERROR/LOG go to [events] (LOG is also re-logged under Kermit tag `radiod`). When
+ * READY/STATUS/ERROR/LOG/DEVICE_LIST go to [events] (LOG is also re-logged under Kermit tag `radiod`). When
  * radiod disconnects or restarts the link drops the connection, clears [connected] and goes back
  * to accepting, so the next radiod instance is picked up automatically; commands issued while
  * disconnected throw [IllegalStateException].
@@ -130,6 +130,8 @@ class DesktopRadioLink(
         send(RadioMessage.TxFrame(rate, retryLimit, flags, frame))
 
     override suspend fun shutdown() = send(RadioMessage.Shutdown)
+
+    override suspend fun listDevices(requestId: UInt) = send(RadioMessage.ListDevices(requestId))
 
     /** Stops accepting, drops the current connection and removes the socket file. */
     override fun close() {
@@ -227,6 +229,8 @@ class DesktopRadioLink(
                 eventsFlow.tryEmit(message)
             }
             is RadioMessage.Status -> eventsFlow.tryEmit(message)
+            // Not logged: a list arrives every 2 s while the radio is off; the adapter repository logs the changes.
+            is RadioMessage.DeviceList -> eventsFlow.tryEmit(message)
             is RadioMessage.AppToRadiod ->
                 log.w { "dispatchIncoming(): ignoring command sent by radiod -> type=${message::class.simpleName}" }
         }

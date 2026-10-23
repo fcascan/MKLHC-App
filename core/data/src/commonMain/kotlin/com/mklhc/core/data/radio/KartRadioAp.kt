@@ -99,6 +99,8 @@ interface KartRadioAp {
      * Brings the radio up. Suspends until it is ready to beacon. Only meaningful while
      * [adapterState] is [AdapterState.READY]. Idempotent when already started.
      *
+     * @throws AdapterUnavailableException when no usable adapter is found right before the bring-up; the radio is
+     *   left down, and the orchestrator goes back to waiting for an adapter.
      * @throws Exception when the radio cannot be started.
      */
     suspend fun start()

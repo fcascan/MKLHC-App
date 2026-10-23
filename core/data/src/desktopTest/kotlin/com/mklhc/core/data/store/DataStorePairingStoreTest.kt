@@ -7,14 +7,20 @@ import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.data.CapturingLogWriter
 import com.mklhc.core.data.capturingLogger
 import com.mklhc.core.data.hex
+import com.mklhc.core.domain.AdapterSelection
 import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.PairedKart
+import com.mklhc.core.domain.UsbId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.file.Files
 import kotlin.test.AfterTest
@@ -142,6 +148,73 @@ class DataStorePairingStoreTest : PairingStoreContract() {
     }
 
     @Test
+    fun theAdapterSelectionSurvivesReopeningTheFile() = runTest {
+        val file = newFile()
+        val log = Logger.withTag("DataStorePairingStoreTest")
+        val firstScope = newScope()
+        val first = DataStorePairingStore(open(file, log, firstScope), CryptoPrimitives(), log)
+        val manual = AdapterSelection.Manual(UsbId(0x2357, 0x012D))
+        first.setAdapterSelection(manual)
+
+        firstScope.coroutineContext[Job]!!.cancelAndJoin()
+        val second = DataStorePairingStore(open(file, log), CryptoPrimitives(), log)
+        assertEquals(manual, second.getAdapterSelection())
+
+        second.setAdapterSelection(AdapterSelection.Automatic)
+        assertEquals(AdapterSelection.Automatic, second.getAdapterSelection())
+    }
+
+    @Test
+    fun anUnreadableStoredAdapterSelectionReadsAsAutomaticWithAWarning() = runTest {
+        val badValues = listOf("", "manual", "2357", "2357:012", "zzzz:yyyy", "2357:012d:1", "0x2357:0x012d", " 2357:012d")
+        badValues.forEach { bad ->
+            val writer = CapturingLogWriter()
+            val log = capturingLogger(writer)
+            val dataStore = open(newFile(), log)
+            dataStore.edit { it[PairingPreferenceKeys.ADAPTER_SELECTION] = bad }
+            val store = DataStorePairingStore(dataStore, CryptoPrimitives(), log)
+
+            assertEquals(AdapterSelection.Automatic, store.getAdapterSelection(), "stored='$bad'")
+            assertTrue(writer.logged(Severity.Warn), "an unreadable adapter selection must be logged -> stored='$bad'")
+        }
+    }
+
+    @Test
+    fun anUnreadableStoredAdapterSelectionIsReportedOnceNotOnEveryUnrelatedEdit() = runTest {
+        val writer = CapturingLogWriter()
+        val log = capturingLogger(writer)
+        val dataStore = open(newFile(), log)
+        dataStore.edit { it[PairingPreferenceKeys.ADAPTER_SELECTION] = "manual" }
+        val store = DataStorePairingStore(dataStore, CryptoPrimitives(), log)
+        val seen = Channel<AdapterSelection>(Channel.UNLIMITED)
+        val collector = launch(Dispatchers.IO) { store.observeAdapterSelection().collect { seen.send(it) } }
+        assertEquals(AdapterSelection.Automatic, seen.receive())
+
+        // Straight to the file, so nothing but the collector logs while it runs.
+        repeat(UNRELATED_EDITS) { index -> dataStore.edit { it[PairingPreferenceKeys.MAX_THROTTLE_PERCENT] = 50 + index } }
+        // Real time, off the test scheduler: the collector runs on the IO dispatcher and sees every edit.
+        withContext(Dispatchers.IO) { delay(SETTLE_MS) }
+        collector.cancelAndJoin()
+
+        assertTrue(seen.tryReceive().isFailure, "the selection did not change, so nothing more is emitted")
+        val warnings = writer.entries.count { it.severity == Severity.Warn && "unreadable stored adapter selection" in it.message }
+        assertEquals(1, warnings, writer.allText())
+    }
+
+    @Test
+    fun aStoredAdapterSelectionIsReadBackFromItsTextForm() = runTest {
+        val log = Logger.withTag("DataStorePairingStoreTest")
+        val dataStore = open(newFile(), log)
+        val store = DataStorePairingStore(dataStore, CryptoPrimitives(), log)
+
+        dataStore.edit { it[PairingPreferenceKeys.ADAPTER_SELECTION] = "0BDA:C812" }
+        assertEquals(AdapterSelection.Manual(UsbId(0x0BDA, 0xC812)), store.getAdapterSelection())
+
+        dataStore.edit { it[PairingPreferenceKeys.ADAPTER_SELECTION] = "auto" }
+        assertEquals(AdapterSelection.Automatic, store.getAdapterSelection())
+    }
+
+    @Test
     fun anIncompleteOrMalformedPairedKartReadsAsNone() = runTest {
         val writer = CapturingLogWriter()
         val log = capturingLogger(writer)
@@ -167,5 +240,10 @@ class DataStorePairingStoreTest : PairingStoreContract() {
 
         assertEquals(32, store.getMasterSecret().size, "a fresh identity is generated over the corrupt file")
         assertTrue(writer.logged(Severity.Error), "file corruption must be logged at error level")
+    }
+
+    private companion object {
+        const val UNRELATED_EDITS = 3
+        const val SETTLE_MS = 300L
     }
 }

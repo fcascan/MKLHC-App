@@ -3,6 +3,7 @@ package com.mklhc.app.spike
 import co.touchlab.kermit.Logger
 import com.mklhc.app.desktop.findRadiodExecutable
 import com.mklhc.core.crypto.CryptoPrimitives
+import com.mklhc.core.domain.UsbId
 import com.mklhc.core.netstack.AddressPlan
 import com.mklhc.core.netstack.NetstackConfig
 import com.mklhc.core.netstack.NetstackNode
@@ -165,8 +166,6 @@ internal suspend fun runSpikeSession(
             val accessPoint = RadioAccessPoint(
                 radio = link,
                 options = RadioOptions(
-                    vid = args.vid,
-                    pid = args.pid,
                     txPowerIndex = args.txPowerIndex,
                     readyTimeoutMs = args.readyTimeoutMs,
                 ),
@@ -194,7 +193,7 @@ internal suspend fun runSpikeSession(
                 sessionJobs += scope.launch { runPairingProbe(node, accessPoint.associatedStation, primitives, log) }
                 sessionJobs += scope.launch { watchStopFile(stopFile, stop, log) }
                 supervisor.start()
-                sessionJobs += armBringUp(scope, link, accessPoint, pairing, stop, log) {
+                sessionJobs += armBringUp(scope, link, accessPoint, args.adapter, pairing, stop, log) {
                     printPairing(pairing, qrPath, args, console, onAir = true)
                 }
                 if (args.durationSeconds > 0) {
@@ -267,7 +266,7 @@ internal suspend fun runSpikeSession(
  * [stop].
  *
  * Every bring-up is followed by serving the network: a bring-up drops whatever the access point served before (radiod
- * restarted, so its beacon and identity are gone).
+ * restarted, so its beacon and identity are gone). Every bring-up opens [adapter], the one the command line names.
  *
  * @return the job that runs all of this, so the cleanup can end it before the radio is shut down.
  */
@@ -275,6 +274,7 @@ private fun armBringUp(
     scope: CoroutineScope,
     link: DesktopRadioLink,
     accessPoint: RadioAccessPoint,
+    adapter: UsbId,
     pairing: SpikePairing,
     stop: CompletableDeferred<StopRequest>,
     log: Logger,
@@ -290,7 +290,7 @@ private fun armBringUp(
         link.connected.collectLatest { isConnected ->
             if (!isConnected) return@collectLatest
             try {
-                accessPoint.bringUp(pairing.apConfig.channel)
+                accessPoint.bringUp(pairing.apConfig.channel, adapter)
                 accessPoint.serve(pairing.apConfig)
                 onRadioUp()
             } catch (cancelled: CancellationException) {

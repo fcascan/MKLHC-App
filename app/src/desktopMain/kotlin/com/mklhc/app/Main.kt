@@ -9,6 +9,7 @@ import com.mklhc.app.desktop.DesktopDataDirectory
 import com.mklhc.app.desktop.DesktopKartRuntime
 import com.mklhc.app.desktop.DesktopRadioSettings
 import com.mklhc.app.di.initKoin
+import com.mklhc.core.data.radio.UsbAdapterRepository
 import com.mklhc.core.data.session.KartSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -36,8 +37,8 @@ import kotlin.system.exitProcess
  *
  * Otherwise it locks the data directory first ([DesktopDataDirectory]): when another instance holds it, the process ends
  * with a message saying so, since two instances would fight over the adapter and the pairing file. It then builds the
- * [DesktopKartRuntime] (radiod, the radio, the pairing store and the real session), binds its session in place of the
- * demo through [initKoin]'s extra module (Koin lets a later module override a definition, see [desktopSessionModule])
+ * [DesktopKartRuntime] (radiod, the radio, the pairing store, the USB adapters and the real session), binds its session
+ * and its adapter repository in place of the demo's through [initKoin]'s extra module (Koin lets a later module override a definition, see [desktopSessionModule])
  * and starts it, so radiod is launched and connects while the window opens. The screens' ViewModels are resolved from
  * Koin, so it is started before the window.
  *
@@ -64,7 +65,7 @@ fun main(args: Array<String>) {
         return
     }
     log.i {
-        "main(): starting -> mode=radio radio=${settings.radioId} radiod=${settings.radiodExecutable} " +
+        "main(): starting -> mode=radio radiod=${settings.radiodExecutable} " +
             "dataDirectory=${settings.dataDirectory} videoDump=${settings.videoDumpDirectory ?: "off"}"
     }
     val dataDirectory = lockDataDirectoryOrExit(settings, log)
@@ -83,7 +84,7 @@ fun main(args: Array<String>) {
     }
     Runtime.getRuntime().addShutdownHook(Thread({ exitStop.run(TRIGGER_SHUTDOWN_HOOK) }, SHUTDOWN_HOOK_THREAD_NAME))
     try {
-        initKoin(extra = desktopSessionModule(runtime.session))
+        initKoin(extra = desktopSessionModule(runtime.session, runtime.adapters))
         runBlocking { runtime.start() }
         runAppWindow(title = RADIO_WINDOW_TITLE, exitStop = exitStop, log = log)
     } catch (failure: Exception) {
@@ -97,17 +98,19 @@ fun main(args: Array<String>) {
 }
 
 /**
- * The Koin module that binds [session] as the app's [KartSession].
+ * The Koin module that binds [session] as the app's [KartSession] and [adapters] as its [UsbAdapterRepository].
  *
- * Business logic: loaded after the app's own modules (see [initKoin]), it overrides their demo binding for every screen.
- * Koin (4.1, the version in use) allows a later definition of the same type to override an earlier one by default; the
- * app's Koin test checks that the ViewModels then get the overriding session. The demo definition stays declared but is
- * never created, since nothing asks for it.
+ * Business logic: loaded after the app's own modules (see [initKoin]), it overrides their demo bindings for every
+ * screen. Koin (4.1, the version in use) allows a later definition of the same type to override an earlier one by
+ * default; the app's Koin test checks that the ViewModels then get the overriding session. The demo definitions stay
+ * declared but are never created, since nothing asks for them.
  *
  * @param session the session the screens drive.
+ * @param adapters the USB adapters radiod sees and the user's choice among them.
  */
-internal fun desktopSessionModule(session: KartSession): Module = module {
+internal fun desktopSessionModule(session: KartSession, adapters: UsbAdapterRepository): Module = module {
     single<KartSession> { session }
+    single<UsbAdapterRepository> { adapters }
 }
 
 /**

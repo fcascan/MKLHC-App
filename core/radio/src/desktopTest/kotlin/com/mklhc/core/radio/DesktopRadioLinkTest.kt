@@ -125,9 +125,10 @@ class DesktopRadioLinkTest {
         link.updateBeacon(beacon)
         link.txFrame(rate = "6M", retryLimit = 7, flags = 0, frame = frame)
         link.stopBeacon()
+        link.listDevices(requestId = 5u)
         link.shutdown()
 
-        val received = List(8) { radiod.receive() }
+        val received = List(9) { radiod.receive() }
         assertThat(received).containsExactly(
             RadioMessage.OpenDevice(0x0bda, 0xc812),
             RadioMessage.Init(6, 20, 30),
@@ -136,8 +137,24 @@ class DesktopRadioLinkTest {
             RadioMessage.UpdateBeacon(beacon),
             RadioMessage.TxFrame("6M", 7, 0, frame),
             RadioMessage.StopBeacon,
+            RadioMessage.ListDevices(5u),
             RadioMessage.Shutdown,
         )
+    }
+
+    @Test
+    fun `requestDeviceList sends LIST_DEVICES and returns radiod's DEVICE_LIST`() = linkTest {
+        val radiod = connectedRadiod()
+        val devices = listOf(
+            UsbDeviceEntry(vid = 0x2357, pid = 0x012d, bus = 1, address = 9, deviceClass = 0, access = UsbAccess.OPENABLE),
+            UsbDeviceEntry(vid = 0x046d, pid = 0xc077, bus = 1, address = 3, deviceClass = 0, access = UsbAccess.DRIVER_UNSUPPORTED),
+        )
+
+        val request = async { link.requestDeviceList(timeoutMs = 5_000) }
+        val sent = radiod.receive() as RadioMessage.ListDevices
+        radiod.send(RadioMessage.DeviceList(requestId = sent.requestId, devices = devices))
+
+        assertThat(request.await()).isEqualTo(devices)
     }
 
     @Test

@@ -26,6 +26,7 @@ class FakeRadioLinkTest {
         link.updateBeacon(byteArrayOf(3))
         link.txFrame(rate = "6M", retryLimit = 7, flags = 0, frame = byteArrayOf(0x80.toByte()))
         link.stopBeacon()
+        link.listDevices(requestId = 12u)
         link.shutdown()
 
         assertThat(link.sentMessages).isEqualTo(
@@ -37,9 +38,40 @@ class FakeRadioLinkTest {
                 RadioMessage.UpdateBeacon(byteArrayOf(3)),
                 RadioMessage.TxFrame("6M", 7, 0, byteArrayOf(0x80.toByte())),
                 RadioMessage.StopBeacon,
+                RadioMessage.ListDevices(12u),
                 RadioMessage.Shutdown,
             ),
         )
+    }
+
+    @Test
+    fun `listDevices answers with nothing unless a device list reply is configured, echoing the request id`() = runTest {
+        val link = FakeRadioLink()
+        val device = UsbDeviceEntry(vid = 0x2357, pid = 0x012d, bus = 1, address = 4, deviceClass = 0, access = UsbAccess.OPENABLE)
+
+        link.events.test {
+            link.listDevices(requestId = 1u)
+            expectNoEvents()
+
+            link.deviceListReply = listOf(device)
+            link.listDevices(requestId = 2u)
+            assertThat(awaitItem()).isEqualTo(RadioMessage.DeviceList(requestId = 2u, devices = listOf(device)))
+            cancelAndIgnoreRemainingEvents()
+        }
+        assertThat(link.sentOfType<RadioMessage.ListDevices>()).hasSize(2)
+    }
+
+    @Test
+    fun `a configured failure also stops the device list reply`() = runTest {
+        val link = FakeRadioLink()
+        link.deviceListReply = emptyList()
+        link.failure = IllegalStateException("radiod is not connected")
+
+        link.events.test {
+            assertFailsWith<IllegalStateException> { link.listDevices(requestId = 1u) }
+            expectNoEvents()
+            cancelAndIgnoreRemainingEvents()
+        }
     }
 
     @Test

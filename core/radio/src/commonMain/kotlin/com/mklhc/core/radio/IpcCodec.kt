@@ -18,11 +18,13 @@ enum class IpcMessageType(val id: Int) {
     STOP_BEACON(0x0007),
     TX_FRAME(0x0008),
     SHUTDOWN(0x0009),
+    LIST_DEVICES(0x000A),
     READY(0x0101),
     RX_FRAME(0x0102),
     STATUS(0x0103),
     LOG(0x0104),
     ERROR(0x0105),
+    DEVICE_LIST(0x0106),
     ;
 
     companion object {
@@ -58,15 +60,19 @@ class IpcDecodeException(message: String) : IllegalArgumentException(message)
  * | STOP_BEACON | (empty) |
  * | TX_FRAME | lp(rate utf8), u8 retryLimit, u8 flags, lp(frame) |
  * | SHUTDOWN | (empty) |
+ * | LIST_DEVICES | u32 requestId |
  * | READY | lp(chipId utf8), lp(firmware utf8), lp(devourerVersion utf8) |
  * | RX_FRAME | i16 rssi, u8 rate, u64 tsf, lp(frame) |
  * | STATUS | u32 rx, u32 tx, u32 txErrors, u32 beacons |
  * | LOG | u8 level, lp(text utf8) |
  * | ERROR | u32 code, lp(text utf8) |
+ * | DEVICE_LIST | u32 requestId (echoed), u32 count, then count x (u16 vid, u16 pid, u8 bus, u8 address, u8 deviceClass, u8 access) |
  *
  * Decoding is strict: a short header, an unknown type, a declared length that does not match the
- * buffer, a field that overruns the payload, invalid UTF-8 or unread bytes left in the payload are
- * all rejected ([decode] throws [IpcDecodeException], [decodeOrNull] returns null).
+ * buffer, a field that overruns the payload, invalid UTF-8, a DEVICE_LIST count that does not match
+ * the devices carried or unread bytes left in the payload are all rejected ([decode] throws
+ * [IpcDecodeException], [decodeOrNull] returns null). The one lenient field is DEVICE_LIST's
+ * `access` byte: an unknown code decodes as [UsbAccess.UNKNOWN] so a newer radiod cannot break it.
  *
  * For stream transports, read [HEADER_SIZE] bytes, ask [payloadLengthOf] how many payload bytes
  * follow, read them, and hand the whole message to [decode].
@@ -75,11 +81,14 @@ object IpcCodec {
     /** Size in bytes of the message header. */
     const val HEADER_SIZE = 8
 
-    /** Protocol version sent in HELLO. */
-    const val PROTOCOL_VERSION = 1
+    /** Protocol version sent in HELLO; 2 added LIST_DEVICES / DEVICE_LIST. radiod must report the same. */
+    const val PROTOCOL_VERSION = 2
 
     /** Largest payload accepted on encode and decode (1 MiB); protects against corrupt lengths. */
     const val MAX_PAYLOAD_LENGTH = 1 shl 20
+
+    /** Most devices one DEVICE_LIST can carry: the payload minus its u32 requestId and u32 count. */
+    const val MAX_DEVICE_LIST_ENTRIES = (MAX_PAYLOAD_LENGTH - 8) / UsbDeviceEntry.WIRE_SIZE
 
     /** Encodes [msg] to header plus payload bytes. Throws if the payload exceeds [MAX_PAYLOAD_LENGTH]. */
     fun encode(msg: RadioMessage): ByteArray {
@@ -123,6 +132,10 @@ object IpcCodec {
                 IpcMessageType.TX_FRAME
             }
             RadioMessage.Shutdown -> IpcMessageType.SHUTDOWN
+            is RadioMessage.ListDevices -> {
+                writer.u32(msg.requestId)
+                IpcMessageType.LIST_DEVICES
+            }
             is RadioMessage.Ready -> {
                 writer.lengthPrefixed(msg.chipId.encodeToByteArray())
                 writer.lengthPrefixed(msg.firmware.encodeToByteArray())
@@ -152,6 +165,22 @@ object IpcCodec {
                 writer.u32(msg.code)
                 writer.lengthPrefixed(msg.text.encodeToByteArray())
                 IpcMessageType.ERROR
+            }
+            is RadioMessage.DeviceList -> {
+                require(msg.devices.size <= MAX_DEVICE_LIST_ENTRIES) {
+                    "too many devices: count=${msg.devices.size} max=$MAX_DEVICE_LIST_ENTRIES"
+                }
+                writer.u32(msg.requestId)
+                writer.u32(msg.devices.size.toUInt())
+                for (device in msg.devices) {
+                    writer.u16(device.vid)
+                    writer.u16(device.pid)
+                    writer.u8(device.bus)
+                    writer.u8(device.address)
+                    writer.u8(device.deviceClass)
+                    writer.u8(device.access.code)
+                }
+                IpcMessageType.DEVICE_LIST
             }
         }
         return writer.finish(type)
@@ -223,6 +252,8 @@ object IpcCodec {
             )
             IpcMessageType.LOG -> RadioMessage.Log(level = reader.u8(), text = reader.string())
             IpcMessageType.ERROR -> RadioMessage.Error(code = reader.u32(), text = reader.string())
+            IpcMessageType.LIST_DEVICES -> RadioMessage.ListDevices(requestId = reader.u32())
+            IpcMessageType.DEVICE_LIST -> RadioMessage.DeviceList(requestId = reader.u32(), devices = readDevices(reader))
         }
         reader.requireFullyConsumed(type)
         return message
@@ -251,6 +282,25 @@ object IpcCodec {
             throw IpcDecodeException("declared length above maximum: length=$length max=$MAX_PAYLOAD_LENGTH")
         }
         return length.toInt()
+    }
+
+    /** Reads DEVICE_LIST's count and devices; a count the payload cannot hold is rejected before allocating. */
+    private fun readDevices(reader: PayloadReader): List<UsbDeviceEntry> {
+        val count = reader.u32()
+        val fits = (reader.remaining() / UsbDeviceEntry.WIRE_SIZE).toUInt()
+        if (count > fits) {
+            throw IpcDecodeException("device count overruns payload: count=$count remaining=${reader.remaining()}")
+        }
+        return List(count.toInt()) {
+            UsbDeviceEntry(
+                vid = reader.u16(),
+                pid = reader.u16(),
+                bus = reader.u8(),
+                address = reader.u8(),
+                deviceClass = reader.u8(),
+                access = UsbAccess.fromCode(reader.u8()),
+            )
+        }
     }
 
     private fun readU16(bytes: ByteArray, offset: Int): Int =
@@ -399,6 +449,9 @@ private class PayloadReader(
             throw IpcDecodeException("invalid UTF-8 text: length=${bytes.size}")
         }
     }
+
+    /** Payload bytes not read yet. */
+    fun remaining(): Int = end - position
 
     fun requireFullyConsumed(type: IpcMessageType) {
         if (position != end) {

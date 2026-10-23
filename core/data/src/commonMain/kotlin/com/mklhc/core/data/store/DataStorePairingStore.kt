@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import co.touchlab.kermit.Logger
 import com.mklhc.core.crypto.CryptoPrimitives
+import com.mklhc.core.domain.AdapterSelection
 import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.PairedKart
 import kotlinx.coroutines.CoroutineScope
@@ -39,6 +40,9 @@ internal object PairingPreferenceKeys {
     val STEERING_EXPO_PERCENT = intPreferencesKey("steering_expo_percent")
     val STEERING_TRIM_PERCENT = intPreferencesKey("steering_trim_percent")
     val SHUTDOWN_ON_EXIT = booleanPreferencesKey("shutdown_on_exit")
+
+    /** `auto`, or the chosen adapter's `vvvv:pppp`. */
+    val ADAPTER_SELECTION = stringPreferencesKey("adapter_selection")
 }
 
 /**
@@ -49,7 +53,9 @@ internal object PairingPreferenceKeys {
  * leave two different values behind; later calls, in this or a later process, read the same ones. The
  * file is the installation's whole identity, so a stored value that is present but malformed (a master
  * secret of the wrong size, a multicast BSSID, an unknown channel) is logged and regenerated rather
- * than trusted, and out-of-range settings are clamped to the nearest valid ones. An unreadable file
+ * than trusted, and out-of-range settings are clamped to the nearest valid ones. The adapter selection is
+ * kept as the text `auto` or `vvvv:pppp`; an unreadable text reads as automatic, with a warning, and never
+ * fails the read. An unreadable file
  * (corruption) is handled by [createPairingDataStore]: it is replaced and the corruption logged.
  *
  * Secrets: the master secret is stored in the clear in the app's private storage (see the platform
@@ -137,6 +143,21 @@ class DataStorePairingStore(
 
     override fun observeSettings(): Flow<KartSettings> = preferences.map { it.toSettings() }.distinctUntilChanged()
 
+    override suspend fun getAdapterSelection(): AdapterSelection = observeAdapterSelection().first()
+
+    override suspend fun setAdapterSelection(selection: AdapterSelection) {
+        dataStore.edit { prefs -> prefs[PairingPreferenceKeys.ADAPTER_SELECTION] = selection.toStoredText() }
+        log.i { "setAdapterSelection(): updated -> selection=${selection.toStoredText()}" }
+    }
+
+    // Deduplicated on the stored text first, so an unreadable value is reported once per distinct value, not on every
+    // edit of an unrelated preference.
+    override fun observeAdapterSelection(): Flow<AdapterSelection> =
+        preferences.map { it[PairingPreferenceKeys.ADAPTER_SELECTION] }
+            .distinctUntilChanged()
+            .map { stored -> storedTextToAdapterSelection(stored) }
+            .distinctUntilChanged()
+
     /**
      * Returns the value stored under [key] when it is present and [isValid]; otherwise creates one
      * with [create], persists it and returns it. The check-and-create runs inside one atomic `edit`.
@@ -178,6 +199,15 @@ class DataStorePairingStore(
             log.w { "toSettings(): stored settings out of range, clamped -> maxThrottle=$maxThrottle expo=$expo trim=$trim" }
         }
         return coerced
+    }
+
+    /** The [stored] selection text; absent reads as automatic, an unreadable value reads as automatic with a warning. */
+    private fun storedTextToAdapterSelection(stored: String?): AdapterSelection {
+        if (stored == null) return AdapterSelection.Automatic
+        return stored.toAdapterSelectionOrNull() ?: run {
+            log.w { "storedTextToAdapterSelection(): unreadable stored adapter selection, treating as automatic -> stored=$stored" }
+            AdapterSelection.Automatic
+        }
     }
 
     private companion object {

@@ -27,6 +27,10 @@ import kotlin.time.Duration.Companion.seconds
  *   lost or fails, so a radio that cannot beacon or a kart that never associates does not busy-loop (and
  *   flood the log): the wait starts at the initial value and doubles up to the maximum, resetting after a
  *   session that reached driving.
+ * - [adapterRetryDelay] bounds the wait after a start found no usable adapter (unplugged between the platform's
+ *   last look and the fresh scan the start makes): the session waits for the platform to report the adapter gone and
+ *   back, but tries again after this long if the platform keeps saying it is ready, so it neither gives up nor
+ *   busy-loops.
  *
  * @property sessionRcdPort TCP port the app's RCD server listens on for a known kart (session mode).
  * @property pairingRcdPort TCP port the app's RCD server listens on while pairing.
@@ -43,6 +47,7 @@ import kotlin.time.Duration.Companion.seconds
  * @property connectWindow how long the app may take to open its channels after the handshake (shared).
  * @property recoveryBackoffInitial the first wait before re-beaconing after a session is lost or fails.
  * @property recoveryBackoffMax the ceiling the doubling recovery wait is capped at.
+ * @property adapterRetryDelay the longest wait before a start that found no usable adapter is tried again.
  */
 data class SessionConfig(
     val sessionRcdPort: Int = 5202,
@@ -60,6 +65,7 @@ data class SessionConfig(
     val connectWindow: Duration = 5.seconds,
     val recoveryBackoffInitial: Duration = 500.milliseconds,
     val recoveryBackoffMax: Duration = 5.seconds,
+    val adapterRetryDelay: Duration = 2.seconds,
 ) {
     /** The kart's drive (teleop) UDP port the app sends to; the kart protocol fixes it. */
     val kartDrivePort: Int = FujiPorts.DRIVE

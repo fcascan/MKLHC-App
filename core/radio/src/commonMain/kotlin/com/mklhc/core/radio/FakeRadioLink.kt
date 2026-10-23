@@ -14,8 +14,9 @@ import kotlinx.coroutines.flow.update
  *
  * Business logic: every command is recorded, in call order, as the [RadioMessage.AppToRadiod]
  * radiod would have received ([sentMessages]); nothing touches a socket. A test plays the radiod
- * side by pushing received frames with [emitRxFrame] and notifications with [emitEvent]. The flows
- * behave like the real link's: hot, no replay, so collect before emitting.
+ * side by pushing received frames with [emitRxFrame] and notifications with [emitEvent], or lets
+ * [deviceListReply] answer LIST_DEVICES by itself. The flows behave like the real link's: hot, no
+ * replay, so collect before emitting.
  *
  * Failure injection: set [failure] to make every following command throw it instead of recording.
  * The recorded list is held in a [StateFlow], so concurrent commands never lose a record.
@@ -45,6 +46,13 @@ class FakeRadioLink : RadioLink {
     /** When non-null, every command throws this instead of being recorded. */
     var failure: Throwable? = null
 
+    /**
+     * When non-null, [listDevices] answers like radiod: right after recording the command it emits a
+     * [RadioMessage.DeviceList] echoing the request id, with these devices, on [events]. When null, nothing answers
+     * and a test plays the reply itself with [emitEvent], using the id of the recorded [RadioMessage.ListDevices].
+     */
+    var deviceListReply: List<UsbDeviceEntry>? = null
+
     /** Returns the recorded commands of type [T], oldest first. */
     inline fun <reified T : RadioMessage.AppToRadiod> sentOfType(): List<T> = sentMessages.filterIsInstance<T>()
 
@@ -58,7 +66,7 @@ class FakeRadioLink : RadioLink {
         rxFramesFlow.tryEmit(frame)
     }
 
-    /** Plays radiod sending a notification (READY, STATUS, LOG, ERROR) to collectors of [events]. */
+    /** Plays radiod sending a notification (READY, STATUS, LOG, ERROR, DEVICE_LIST) to collectors of [events]. */
     fun emitEvent(event: RadioMessage.RadiodToApp) {
         eventsFlow.tryEmit(event)
     }
@@ -81,6 +89,11 @@ class FakeRadioLink : RadioLink {
         record(RadioMessage.TxFrame(rate, retryLimit, flags, frame.copyOf()))
 
     override suspend fun shutdown() = record(RadioMessage.Shutdown)
+
+    override suspend fun listDevices(requestId: UInt) {
+        record(RadioMessage.ListDevices(requestId))
+        deviceListReply?.let { eventsFlow.tryEmit(RadioMessage.DeviceList(requestId, it)) }
+    }
 
     private fun record(message: RadioMessage.AppToRadiod) {
         failure?.let { throw it }

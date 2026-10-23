@@ -110,6 +110,33 @@ class IpcCodecTest {
     @Test
     fun `ERROR round-trips`() = roundTrip(RadioMessage.Error(code = 0xDEADBEEFu, text = "firmware upload failed"))
 
+    @Test
+    fun `LIST_DEVICES round-trips`() {
+        roundTrip(RadioMessage.ListDevices(requestId = 7u))
+        roundTrip(RadioMessage.ListDevices(requestId = UInt.MAX_VALUE))
+    }
+
+    @Test
+    fun `an empty DEVICE_LIST round-trips`() =
+        roundTrip(RadioMessage.DeviceList(requestId = 0u, devices = emptyList()))
+
+    @Test
+    fun `a DEVICE_LIST with one device per access code round-trips`() = roundTrip(
+        RadioMessage.DeviceList(
+            requestId = 0xCAFEBABEu,
+            devices = UsbAccess.entries.mapIndexed { index, access ->
+                UsbDeviceEntry(
+                    vid = 0x2357 + index,
+                    pid = 0x012d,
+                    bus = index + 1,
+                    address = 10 + index,
+                    deviceClass = 0xFF,
+                    access = access,
+                )
+            },
+        ),
+    )
+
     // ---- value edge cases ----
 
     @Test
@@ -140,6 +167,11 @@ class IpcCodecTest {
         roundTrip(RadioMessage.UpdateBeacon(beacon = ByteArray(8_000) { (it % 251).toByte() }))
 
     // ---- byte-exact layouts ----
+
+    @Test
+    fun `the protocol version is 2, the one with LIST_DEVICES`() {
+        assertThat(IpcCodec.PROTOCOL_VERSION).isEqualTo(2)
+    }
 
     @Test
     fun `header is type flags and length in little-endian order`() {
@@ -221,6 +253,75 @@ class IpcCodecTest {
     }
 
     @Test
+    fun `LIST_DEVICES is type 0x000A carrying the request id`() {
+        assertContentEquals(
+            byteArrayOf(
+                // header: type 0x000A, flags 0, length 4
+                0x0A, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+                // requestId u32
+                0x04, 0x03, 0x02, 0x01,
+            ),
+            IpcCodec.encode(RadioMessage.ListDevices(requestId = 0x01020304u)),
+        )
+    }
+
+    @Test
+    fun `DEVICE_LIST has the documented byte layout`() {
+        val bytes = IpcCodec.encode(
+            RadioMessage.DeviceList(
+                requestId = 0x01020304u,
+                devices = listOf(
+                    UsbDeviceEntry(vid = 0x2357, pid = 0x012d, bus = 1, address = 7, deviceClass = 0, access = UsbAccess.OPENABLE),
+                    UsbDeviceEntry(vid = 0x0bda, pid = 0xc812, bus = 2, address = 3, deviceClass = 0xEF, access = UsbAccess.BUSY),
+                ),
+            ),
+        )
+
+        assertContentEquals(
+            byteArrayOf(
+                // header: type 0x0106, flags 0, length 24
+                0x06, 0x01, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
+                // requestId u32
+                0x04, 0x03, 0x02, 0x01,
+                // count u32
+                0x02, 0x00, 0x00, 0x00,
+                // vid u16, pid u16, bus u8, address u8, deviceClass u8, access u8
+                0x57, 0x23, 0x2d, 0x01, 0x01, 0x07, 0x00, 0x00,
+                0xda.toByte(), 0x0b, 0x12, 0xc8.toByte(), 0x02, 0x03, 0xEF.toByte(), 0x03,
+            ),
+            bytes,
+        )
+    }
+
+    @Test
+    fun `DEVICE_LIST access codes are the documented wire values`() {
+        assertThat(UsbAccess.entries.associateWith { it.code }).isEqualTo(
+            mapOf(
+                UsbAccess.OPENABLE to 0,
+                UsbAccess.DRIVER_UNSUPPORTED to 1,
+                UsbAccess.ACCESS_DENIED to 2,
+                UsbAccess.BUSY to 3,
+                UsbAccess.ERROR to 4,
+                UsbAccess.NOT_PROBED to 5,
+                UsbAccess.UNKNOWN to 0xFF,
+            ),
+        )
+    }
+
+    @Test
+    fun `DEVICE_LIST decodes an access code it does not know as UNKNOWN`() {
+        // requestId 9, count 1, then vid 0x0001, pid 0x0002, bus 3, address 4, class 0, access 9 (not defined).
+        val payload = byteArrayOf(9, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 3, 4, 0, 9)
+        val bytes = rawMessage(type = 0x0106, declaredLength = payload.size.toLong(), payload = payload)
+
+        val decoded = IpcCodec.decode(bytes) as RadioMessage.DeviceList
+
+        assertThat(decoded.devices.single().access).isEqualTo(UsbAccess.UNKNOWN)
+        assertThat(decoded.devices.single().vid).isEqualTo(1)
+        assertThat(decoded.requestId).isEqualTo(9u)
+    }
+
+    @Test
     fun `every message type uses a distinct type id`() {
         val samples = listOf(
             RadioMessage.Hello(1, "t"),
@@ -237,6 +338,8 @@ class IpcCodecTest {
             RadioMessage.Status(0u, 0u, 0u, 0u),
             RadioMessage.Log(0, "l"),
             RadioMessage.Error(0u, "e"),
+            RadioMessage.ListDevices(1u),
+            RadioMessage.DeviceList(1u, emptyList()),
         )
 
         val ids = samples.map { message ->
@@ -322,6 +425,69 @@ class IpcCodecTest {
         val bytes = rawMessage(type = 0x0004, declaredLength = 5, payload = ByteArray(5))
 
         assertThat(IpcCodec.decodeOrNull(bytes)).isNull()
+    }
+
+    @Test
+    fun `decode rejects a DEVICE_LIST whose count promises more devices than it carries`() {
+        // requestId 1, count 2, one 8 byte device.
+        val payload = byteArrayOf(1, 0, 0, 0, 2, 0, 0, 0, 1, 0, 2, 0, 3, 4, 0, 0)
+        val bytes = rawMessage(type = 0x0106, declaredLength = payload.size.toLong(), payload = payload)
+
+        assertThat(IpcCodec.decodeOrNull(bytes)).isNull()
+        assertFailsWith<IpcDecodeException> { IpcCodec.decode(bytes) }
+    }
+
+    @Test
+    fun `decode rejects a DEVICE_LIST whose count is below the devices it carries`() {
+        // requestId 1, count 1, two 8 byte devices.
+        val payload = byteArrayOf(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 3, 4, 0, 0, 5, 0, 6, 0, 7, 8, 0, 0)
+        val bytes = rawMessage(type = 0x0106, declaredLength = payload.size.toLong(), payload = payload)
+
+        assertThat(IpcCodec.decodeOrNull(bytes)).isNull()
+    }
+
+    @Test
+    fun `decode rejects a truncated DEVICE_LIST`() {
+        // requestId 1, count 1, a device cut after its pid.
+        val truncatedDevice = byteArrayOf(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+        val noCount = byteArrayOf(1, 0, 0, 0, 1, 0)
+        val noRequestId = byteArrayOf(1, 0)
+
+        assertThat(IpcCodec.decodeOrNull(rawMessage(0x0106, declaredLength = 12, payload = truncatedDevice))).isNull()
+        assertThat(IpcCodec.decodeOrNull(rawMessage(0x0106, declaredLength = 6, payload = noCount))).isNull()
+        assertThat(IpcCodec.decodeOrNull(rawMessage(0x0106, declaredLength = 2, payload = noRequestId))).isNull()
+    }
+
+    @Test
+    fun `decode rejects a DEVICE_LIST with a huge count without allocating for it`() {
+        val payload = byteArrayOf(1, 0, 0, 0, -1, -1, -1, -1)
+        val bytes = rawMessage(type = 0x0106, declaredLength = payload.size.toLong(), payload = payload)
+
+        assertFailsWith<IpcDecodeException> { IpcCodec.decode(bytes) }
+    }
+
+    @Test
+    fun `decode rejects a LIST_DEVICES whose payload is not exactly the request id`() {
+        val short = rawMessage(type = 0x000A, declaredLength = 3, payload = byteArrayOf(1, 0, 0))
+        val long = rawMessage(type = 0x000A, declaredLength = 5, payload = byteArrayOf(1, 0, 0, 0, 0))
+        val empty = rawMessage(type = 0x000A, declaredLength = 0, payload = ByteArray(0))
+
+        assertThat(IpcCodec.decodeOrNull(short)).isNull()
+        assertThat(IpcCodec.decodeOrNull(long)).isNull()
+        assertThat(IpcCodec.decodeOrNull(empty)).isNull()
+    }
+
+    @Test
+    fun `encode rejects a DEVICE_LIST above the maximum payload`() {
+        // requestId and count take 8 bytes, so this many 8 byte devices is one too many.
+        val tooMany = (IpcCodec.MAX_PAYLOAD_LENGTH - 8) / UsbDeviceEntry.WIRE_SIZE + 1
+        val device = UsbDeviceEntry(vid = 1, pid = 2, bus = 3, address = 4, deviceClass = 0, access = UsbAccess.OPENABLE)
+        val justFits = RadioMessage.DeviceList(requestId = 1u, devices = List(tooMany - 1) { device })
+
+        assertThat(IpcCodec.payloadLengthOf(IpcCodec.encode(justFits))).isEqualTo(IpcCodec.MAX_PAYLOAD_LENGTH)
+        assertFailsWith<IllegalArgumentException> {
+            IpcCodec.encode(RadioMessage.DeviceList(requestId = 1u, devices = List(tooMany) { device }))
+        }
     }
 
     @Test

@@ -22,11 +22,20 @@
  *   STOP_BEACON   0x0007 (empty)
  *   TX_FRAME      0x0008 lp(rate), u8 retry, u8 flags, lp(frame)
  *   SHUTDOWN      0x0009 (empty)
+ *   LIST_DEVICES  0x000A u32 requestId              DEVICE_LIST 0x0106 u32 requestId, u32 count, then
+ *                                                     count x (u16 vid, u16 pid, u8 bus, u8 address,
+ *                                                     u8 deviceClass, u8 access)
+ *
+ * Protocol version 2 added LIST_DEVICES / DEVICE_LIST. DEVICE_LIST echoes the requestId of the
+ * LIST_DEVICES it answers, so the app never takes a late answer for a newer request. `access` is one of
+ * the kUsbAccess* codes below; the app decodes a code it does not know as "unknown" rather than
+ * rejecting the list.
  *
  * Decoding is strict, like the Kotlin side: short header, unknown type, declared length that does not
- * match the buffer, a field overrunning the payload, invalid UTF-8 and unread payload bytes are all
- * rejected with DecodeError. Encoding replaces invalid UTF-8 in text fields with '?' so a stray byte in
- * a devourer log line can never make the Kotlin decoder reject a whole message.
+ * match the buffer, a field overrunning the payload, invalid UTF-8, a DEVICE_LIST count that does not
+ * match the devices carried and unread payload bytes are all rejected with DecodeError. Encoding replaces
+ * invalid UTF-8 in text fields with '?' so a stray byte in a devourer log line can never make the Kotlin
+ * decoder reject a whole message.
  */
 
 #pragma once
@@ -48,7 +57,7 @@ using Bytes = std::vector<uint8_t>;
 inline constexpr size_t kHeaderSize = 8;
 
 /** Protocol version carried in HELLO; must equal IpcCodec.PROTOCOL_VERSION on the Kotlin side. */
-inline constexpr uint16_t kProtocolVersion = 1;
+inline constexpr uint16_t kProtocolVersion = 2;
 
 /** Largest payload accepted on encode and decode (1 MiB); protects against corrupt lengths. */
 inline constexpr uint32_t kMaxPayloadLength = 1u << 20;
@@ -67,11 +76,13 @@ enum class MessageType : uint16_t {
     StopBeacon = 0x0007,
     TxFrame = 0x0008,
     Shutdown = 0x0009,
+    ListDevices = 0x000A,
     Ready = 0x0101,
     RxFrame = 0x0102,
     Status = 0x0103,
     Log = 0x0104,
     Error = 0x0105,
+    DeviceList = 0x0106,
 };
 
 /** LOG levels; the app treats any value above kLogWarn as an error. */
@@ -79,6 +90,26 @@ inline constexpr uint8_t kLogDebug = 0;
 inline constexpr uint8_t kLogInfo = 1;
 inline constexpr uint8_t kLogWarn = 2;
 inline constexpr uint8_t kLogError = 3;
+
+/**
+ * DEVICE_LIST access codes: the result of a trial libusb_open + libusb_close of the device (no claim). Only
+ * devices with a vendor-specific interface (class 0xFF) are opened; any other is reported NOT_PROBED.
+ */
+inline constexpr uint8_t kUsbAccessOpenable = 0;           // libusb_open succeeded
+inline constexpr uint8_t kUsbAccessDriverUnsupported = 1;  // LIBUSB_ERROR_NOT_SUPPORTED (Windows: not WinUSB)
+inline constexpr uint8_t kUsbAccessDenied = 2;             // LIBUSB_ERROR_ACCESS outside Windows (no permission,
+                                                           // on Linux a missing udev rule)
+inline constexpr uint8_t kUsbAccessBusy = 3;               // in use by another program: LIBUSB_ERROR_ACCESS on
+                                                           // Windows (WinUSB grants one handle; our radio too),
+                                                           // LIBUSB_ERROR_BUSY elsewhere (rare from libusb_open)
+inline constexpr uint8_t kUsbAccessError = 4;              // any other libusb error
+inline constexpr uint8_t kUsbAccessNotProbed = 5;          // not opened: does not look like a Wi-Fi adapter
+
+/** Size in bytes of one DEVICE_LIST entry on the wire. */
+inline constexpr size_t kUsbDeviceEntrySize = 8;
+
+/** Most entries one DEVICE_LIST can carry: the payload minus its u32 requestId and u32 count. */
+inline constexpr size_t kMaxDeviceListEntries = (kMaxPayloadLength - 8) / kUsbDeviceEntrySize;
 
 /**
  * Codes carried by ERROR messages. The app does not interpret them (it logs code and text); they are
@@ -143,6 +174,10 @@ struct TxFrame {
 
 struct Shutdown {};
 
+struct ListDevices {
+    uint32_t requestId = 0;
+};
+
 // ---------------------------------------------------------------------------------------------
 // radiod -> app
 // ---------------------------------------------------------------------------------------------
@@ -177,9 +212,24 @@ struct Error {
     std::string text;
 };
 
+/** One USB device in a DEVICE_LIST. */
+struct UsbDeviceEntry {
+    uint16_t vid = 0;
+    uint16_t pid = 0;
+    uint8_t bus = 0;
+    uint8_t address = 0;
+    uint8_t deviceClass = 0;
+    uint8_t access = kUsbAccessError;
+};
+
+struct DeviceList {
+    uint32_t requestId = 0;  // echoes the LIST_DEVICES this answers
+    std::vector<UsbDeviceEntry> devices;
+};
+
 /** Any IPC message, in either direction. */
 using Message = std::variant<Hello, OpenDevice, Init, SetIdentity, StartBeacon, UpdateBeacon, StopBeacon,
-                             TxFrame, Shutdown, Ready, RxFrame, Status, Log, Error>;
+                             TxFrame, Shutdown, ListDevices, Ready, RxFrame, Status, Log, Error, DeviceList>;
 
 /** Thrown by decode / payloadLengthOf when bytes do not form a valid IPC message. */
 class DecodeError : public std::runtime_error {

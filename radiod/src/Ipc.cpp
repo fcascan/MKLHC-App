@@ -59,6 +59,10 @@ struct TypeOf<Shutdown> {
     static constexpr MessageType value = MessageType::Shutdown;
 };
 template <>
+struct TypeOf<ListDevices> {
+    static constexpr MessageType value = MessageType::ListDevices;
+};
+template <>
 struct TypeOf<Ready> {
     static constexpr MessageType value = MessageType::Ready;
 };
@@ -78,6 +82,10 @@ template <>
 struct TypeOf<Error> {
     static constexpr MessageType value = MessageType::Error;
 };
+template <>
+struct TypeOf<DeviceList> {
+    static constexpr MessageType value = MessageType::DeviceList;
+};
 
 bool isKnownType(uint16_t id) {
     switch (static_cast<MessageType>(id)) {
@@ -90,11 +98,13 @@ bool isKnownType(uint16_t id) {
         case MessageType::StopBeacon:
         case MessageType::TxFrame:
         case MessageType::Shutdown:
+        case MessageType::ListDevices:
         case MessageType::Ready:
         case MessageType::RxFrame:
         case MessageType::Status:
         case MessageType::Log:
         case MessageType::Error:
+        case MessageType::DeviceList:
             return true;
     }
     return false;
@@ -290,9 +300,10 @@ public:
         }
     }
 
-private:
+    /** Payload bytes not read yet. */
     size_t remaining() const { return static_cast<size_t>(end_ - position_); }
 
+private:
     void need(size_t count) const {
         if (remaining() < count) {
             throw DecodeError("payload too short: need=" + std::to_string(count) +
@@ -348,6 +359,10 @@ void writePayload(Writer& w, const TxFrame& m) {
 
 void writePayload(Writer&, const Shutdown&) {}
 
+void writePayload(Writer& w, const ListDevices& m) {
+    w.u32(m.requestId);
+}
+
 void writePayload(Writer& w, const Ready& m) {
     w.string(m.chipId);
     w.string(m.firmware);
@@ -376,6 +391,23 @@ void writePayload(Writer& w, const Log& m) {
 void writePayload(Writer& w, const Error& m) {
     w.u32(m.code);
     w.string(m.text);
+}
+
+void writePayload(Writer& w, const DeviceList& m) {
+    if (m.devices.size() > kMaxDeviceListEntries) {
+        throw std::length_error("too many devices: count=" + std::to_string(m.devices.size()) +
+                                " max=" + std::to_string(kMaxDeviceListEntries));
+    }
+    w.u32(m.requestId);
+    w.u32(static_cast<uint32_t>(m.devices.size()));
+    for (const UsbDeviceEntry& device : m.devices) {
+        w.u16(device.vid);
+        w.u16(device.pid);
+        w.u8(device.bus);
+        w.u8(device.address);
+        w.u8(device.deviceClass);
+        w.u8(device.access);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -432,6 +464,11 @@ Message readPayload(MessageType type, Reader& r) {
         }
         case MessageType::Shutdown:
             return Shutdown{};
+        case MessageType::ListDevices: {
+            ListDevices m;
+            m.requestId = r.u32();
+            return m;
+        }
         case MessageType::Ready: {
             Ready m;
             m.chipId = r.string();
@@ -465,6 +502,28 @@ Message readPayload(MessageType type, Reader& r) {
             Error m;
             m.code = r.u32();
             m.text = r.string();
+            return m;
+        }
+        case MessageType::DeviceList: {
+            DeviceList m;
+            m.requestId = r.u32();
+            const uint32_t count = r.u32();
+            if (count > r.remaining() / kUsbDeviceEntrySize) {
+                // Checked before allocating, so a corrupt count cannot reserve gigabytes.
+                throw DecodeError("device count overruns payload: count=" + std::to_string(count) +
+                                  " remaining=" + std::to_string(r.remaining()));
+            }
+            m.devices.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                UsbDeviceEntry device;
+                device.vid = r.u16();
+                device.pid = r.u16();
+                device.bus = r.u8();
+                device.address = r.u8();
+                device.deviceClass = r.u8();
+                device.access = r.u8();
+                m.devices.push_back(device);
+            }
             return m;
         }
     }
@@ -501,6 +560,8 @@ const char* nameOf(MessageType type) {
             return "TX_FRAME";
         case MessageType::Shutdown:
             return "SHUTDOWN";
+        case MessageType::ListDevices:
+            return "LIST_DEVICES";
         case MessageType::Ready:
             return "READY";
         case MessageType::RxFrame:
@@ -511,6 +572,8 @@ const char* nameOf(MessageType type) {
             return "LOG";
         case MessageType::Error:
             return "ERROR";
+        case MessageType::DeviceList:
+            return "DEVICE_LIST";
     }
     return "UNKNOWN";
 }

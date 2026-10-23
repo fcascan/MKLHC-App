@@ -2,6 +2,7 @@ package com.mklhc.app.spike
 
 import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
+import com.mklhc.core.domain.UsbId
 import com.mklhc.core.wifi_ap.ap.ApConfig
 import com.mklhc.core.wifi_ap.ap.RadioOptions
 import kotlinx.coroutines.CompletableDeferred
@@ -60,11 +61,14 @@ fun main(args: Array<String>) {
     exitProcess(runBlocking { runSpikeSession(parsed, stop, cleanupDone) })
 }
 
-/** The parsed command line of [main]. */
+/**
+ * The parsed command line of [main]. The spike names its adapter on the command line (`--vid`, `--pid`; the reference
+ * RTL8812CU `0bda:c812` by default) and does not scan: it is a bench tool run against one known adapter.
+ */
 internal data class SpikeArgs(
     val radiod: Path? = null,
-    val vid: Int = RadioOptions.DEFAULT_VID,
-    val pid: Int = RadioOptions.DEFAULT_PID,
+    val vid: Int = DEFAULT_VID,
+    val pid: Int = DEFAULT_PID,
     val channel: Int = DEFAULT_CHANNEL,
     val txPowerIndex: Int = 0,
     val beaconIntervalTu: Int = ApConfig.DEFAULT_BEACON_INTERVAL_TU,
@@ -75,7 +79,18 @@ internal data class SpikeArgs(
     val showQr: Boolean = true,
     val lightTerminal: Boolean = false,
     val help: Boolean = false,
-)
+) {
+    /** The adapter the radio opens: [vid] and [pid]. */
+    val adapter: UsbId get() = UsbId(vid, pid)
+
+    companion object {
+        /** USB vendor id of the reference adapter (RTL8812CU), the spike's default. */
+        const val DEFAULT_VID = 0x0BDA
+
+        /** USB product id of the reference adapter (RTL8812CU), the spike's default. */
+        const val DEFAULT_PID = 0xC812
+    }
+}
 
 /** A command-line problem; the message is shown to the user. */
 internal class SpikeArgsException(message: String) : IllegalArgumentException(message)

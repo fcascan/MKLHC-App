@@ -6,8 +6,10 @@ import co.touchlab.kermit.Severity
 import com.mklhc.core.data.CapturingLogWriter
 import com.mklhc.core.data.capturingLogger
 import com.mklhc.core.data.hex
+import com.mklhc.core.domain.AdapterSelection
 import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.PairedKart
+import com.mklhc.core.domain.UsbId
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.test.runTest
@@ -20,8 +22,8 @@ import kotlin.test.assertTrue
 
 /**
  * The behaviour every [PairingStore] must have, run against each implementation by a concrete
- * subclass: first-run generation happens exactly once and is then stable, the paired kart and the
- * settings round-trip, observers see updates, returned arrays are copies, and nothing secret is
+ * subclass: first-run generation happens exactly once and is then stable, the paired kart, the
+ * settings and the adapter selection round-trip, observers see updates, returned arrays are copies, and nothing secret is
  * logged.
  */
 abstract class PairingStoreContract {
@@ -129,6 +131,54 @@ abstract class PairingStoreContract {
             assertEquals(second, awaitItem())
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    @Test
+    fun adapterSelectionDefaultsToAutomaticThenRoundTrips() = runTest {
+        val store = newStore()
+        assertEquals(AdapterSelection.Automatic, store.getAdapterSelection())
+
+        val manual = AdapterSelection.Manual(UsbId(0x2357, 0x012D))
+        store.setAdapterSelection(manual)
+        assertEquals(manual, store.getAdapterSelection())
+
+        val other = AdapterSelection.Manual(UsbId(0x0BDA, 0xC812))
+        store.setAdapterSelection(other)
+        assertEquals(other, store.getAdapterSelection())
+
+        store.setAdapterSelection(AdapterSelection.Automatic)
+        assertEquals(AdapterSelection.Automatic, store.getAdapterSelection())
+    }
+
+    @Test
+    fun adapterSelectionObserverSeesTheCurrentValueAndEveryChange() = runTest {
+        val store = newStore()
+        store.observeAdapterSelection().test {
+            assertEquals(AdapterSelection.Automatic, awaitItem())
+
+            val manual = AdapterSelection.Manual(UsbId(0x0BDA, 0x8812))
+            store.setAdapterSelection(manual)
+            assertEquals(manual, awaitItem())
+
+            store.setAdapterSelection(AdapterSelection.Automatic)
+            assertEquals(AdapterSelection.Automatic, awaitItem())
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun adapterSelectionDoesNotDisturbSettingsPairingOrIdentity() = runTest {
+        val store = newStore()
+        val secret = store.getMasterSecret()
+        val settings = KartSettings(maxThrottlePercent = 70)
+        store.setSettings(settings)
+        store.setPairedKart(kart())
+
+        store.setAdapterSelection(AdapterSelection.Manual(UsbId(0x2357, 0x012D)))
+
+        assertContentEquals(secret, store.getMasterSecret())
+        assertEquals(settings, store.getSettings())
+        assertEquals(kart(), store.getPairedKart())
     }
 
     @Test

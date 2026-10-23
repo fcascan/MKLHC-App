@@ -1,7 +1,9 @@
 package com.mklhc.core.data.store
 
+import com.mklhc.core.domain.AdapterSelection
 import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.PairedKart
+import com.mklhc.core.domain.UsbId
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -18,8 +20,9 @@ import kotlinx.coroutines.flow.Flow
  *
  * The getters for these values are therefore "get or create": the first call generates and persists
  * the value (atomically, so concurrent first calls agree on one) and every later call, in this or a
- * later process, returns the same one. The paired kart is optional and replaceable, and the settings
- * start from [KartSettings.DEFAULT].
+ * later process, returns the same one. The paired kart is optional and replaceable, the settings
+ * start from [KartSettings.DEFAULT] and the USB adapter selection starts as [AdapterSelection.Automatic].
+ * A stored adapter selection that cannot be read is never an error: it reads as automatic.
  *
  * Implementations never log the master secret, and arrays they return are copies the caller may
  * overwrite. Losing the store loses the identity: a fresh one is generated and the kart must be paired
@@ -51,6 +54,15 @@ interface PairingStore {
     /** Emits the current settings on collection and again after every change. */
     fun observeSettings(): Flow<KartSettings>
 
+    /** The USB adapter choice, [AdapterSelection.Automatic] until the user picks one by hand. */
+    suspend fun getAdapterSelection(): AdapterSelection
+
+    /** Persists [selection] and notifies [observeAdapterSelection]. */
+    suspend fun setAdapterSelection(selection: AdapterSelection)
+
+    /** Emits the current adapter selection on collection and again after every change. */
+    fun observeAdapterSelection(): Flow<AdapterSelection>
+
     companion object {
         /** Size of the master secret in octets. */
         const val MASTER_SECRET_SIZE = 32
@@ -62,6 +74,27 @@ interface PairingStore {
         val ALLOWED_CHANNELS: List<Int> = listOf(1, 6, 11)
     }
 }
+
+/** The stored text of [AdapterSelection.Automatic]. */
+internal const val ADAPTER_SELECTION_AUTOMATIC_TEXT = "auto"
+
+/**
+ * The text form of an adapter selection: `auto`, or the chosen adapter's `vvvv:pppp`.
+ *
+ * Business logic: the one format both stores persist and log, so a stored value can be read and edited by hand.
+ */
+internal fun AdapterSelection.toStoredText(): String = when (this) {
+    AdapterSelection.Automatic -> ADAPTER_SELECTION_AUTOMATIC_TEXT
+    is AdapterSelection.Manual -> id.toString()
+}
+
+/** Reads [toStoredText] back; null when the text is neither `auto` nor a valid `vvvv:pppp`. */
+internal fun String.toAdapterSelectionOrNull(): AdapterSelection? =
+    if (this == ADAPTER_SELECTION_AUTOMATIC_TEXT) {
+        AdapterSelection.Automatic
+    } else {
+        UsbId.parse(this)?.let { AdapterSelection.Manual(it) }
+    }
 
 /**
  * Creates the values a [PairingStore] generates on first run.

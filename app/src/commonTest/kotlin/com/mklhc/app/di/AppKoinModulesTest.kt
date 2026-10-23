@@ -1,6 +1,8 @@
 package com.mklhc.app.di
 
 import com.mklhc.app.demo.DemoKartSession
+import com.mklhc.core.data.radio.DemoUsbAdapterRepository
+import com.mklhc.core.data.radio.UsbAdapterRepository
 import com.mklhc.core.data.session.FakeKartSession
 import com.mklhc.core.data.session.KartSession
 import com.mklhc.core.domain.LinkState
@@ -56,6 +58,17 @@ class AppKoinModulesTest {
         assertIs<DemoKartSession>(session)
         assertSame(session, koin.get<KartSession>(), "one session for the whole app")
         assertSame(session, koin.get<DemoKartSession>(), "the demo type resolves to the same instance")
+        koin.close()
+    }
+
+    @Test
+    fun theAdapterRepositoryIsTheDemoListAndIsASingleton() {
+        val koin = koinApplication { modules(appKoinModules()) }.koin
+
+        val adapters = koin.get<UsbAdapterRepository>()
+
+        assertIs<DemoUsbAdapterRepository>(adapters)
+        assertSame(adapters, koin.get<UsbAdapterRepository>(), "one adapter repository for the whole app")
         koin.close()
     }
 

@@ -3,14 +3,17 @@ package com.mklhc.core.data.session
 import com.mklhc.core.crypto.CryptoPrimitives
 import com.mklhc.core.data.identity.deriveKartIdentity
 import com.mklhc.core.data.radio.AdapterState
+import com.mklhc.core.data.radio.AdapterUnavailableException
 import com.mklhc.core.data.radio.FakeKartRadioAp
 import com.mklhc.core.data.radio.KartRadioAp
 import com.mklhc.core.data.store.InMemoryPairingStore
 import com.mklhc.core.data.store.PairingStore
+import com.mklhc.core.domain.AdapterResolution
 import com.mklhc.core.domain.KartNetworkKind
 import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.LinkState
 import com.mklhc.core.domain.PairedKart
+import com.mklhc.core.domain.UnavailableReason
 import com.mklhc.core.kart_protocol.teleop.DriveCommand
 import com.mklhc.core.kart_protocol.telemetry.Telemetry
 import com.mklhc.core.kart_protocol.video.LspVideo
@@ -186,6 +189,69 @@ class KartSessionRepositoryTest {
         assertTrue(radio.isStarted, "the radio was started once ready")
         assertEquals(KartNetworkKind.GAME, radio.currentBeacon)
     }
+
+    @Test
+    fun anAdapterThatTurnsUnusableAtStartSendsTheSessionBackToWaitingForIt() = runTest {
+        val radio = FakeKartRadioAp()
+        radio.startFailure = noUsableAdapter()
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+        val states = ArrayList<LinkState>()
+        backgroundScope.launch { repo.linkState.collect { states += it } }
+
+        repo.start()
+        awaitCondition { radio.startCount == 1 }
+        // The fresh scan that failed the start reaches the platform's adapter state a moment later.
+        radio.setAdapterState(AdapterState.ABSENT)
+        withTimeout(5_000) { repo.linkState.first { it == LinkState.NoAdapter } }
+        delay(10_000)
+        assertEquals(1, radio.startCount, "the session waits for the adapter instead of retrying")
+        assertEquals(LinkState.NoAdapter, repo.linkState.value)
+
+        // Plugged in again: the session goes on by itself.
+        radio.startFailure = null
+        radio.setAdapterState(AdapterState.READY)
+        withTimeout(5_000) { repo.linkState.first { it == LinkState.Beaconing(KartNetworkKind.GAME) } }
+        assertEquals(2, radio.startCount)
+        assertTrue(states.none { it is LinkState.Failed }, "an unusable adapter is not a failed session: $states")
+    }
+
+    @Test
+    fun anAdapterStateThatStaysReadyAfterAnUnusableAdapterRetriesTheStartAfterAPauseNotInALoop() = runTest {
+        val radio = FakeKartRadioAp()
+        radio.startFailure = noUsableAdapter()
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+
+        repo.start()
+        awaitCondition { radio.startCount == 1 }
+        assertEquals(LinkState.NoAdapter, repo.linkState.value)
+        delay(SessionConfig().adapterRetryDelay - 100.milliseconds)
+        assertEquals(1, radio.startCount, "no retry before the pause is over")
+        delay(200.milliseconds)
+        assertEquals(2, radio.startCount, "the platform never said the adapter went away, so the start is tried again")
+
+        radio.startFailure = null
+        withTimeout(10_000) { repo.linkState.first { it == LinkState.Beaconing(KartNetworkKind.GAME) } }
+    }
+
+    @Test
+    fun pairingWithAnAdapterThatTurnsUnusableWaitsForItAndThenPairs() = runTest {
+        val radio = FakeKartRadioAp()
+        radio.startFailure = noUsableAdapter()
+        val repo = KartSessionRepository(radio, store(), crypto, backgroundScope, clock = fixedClock, timeSource = testScheduler.timeSource)
+
+        repo.startPairing()
+        awaitCondition { radio.startCount == 1 }
+        radio.setAdapterState(AdapterState.ABSENT)
+        withTimeout(5_000) { repo.linkState.first { it == LinkState.NoAdapter } }
+
+        radio.startFailure = null
+        radio.setAdapterState(AdapterState.READY)
+        withTimeout(5_000) { repo.linkState.first { it == LinkState.Beaconing(KartNetworkKind.PAIRING) } }
+        assertNotNull(repo.pairingQr.value, "the pairing goes on where it was")
+    }
+
+    private fun noUsableAdapter() =
+        AdapterUnavailableException(AdapterResolution.Unavailable(UnavailableReason.NO_COMPATIBLE_DEVICE))
 
     // ---- teleop: cadence, clamping, deadman ---------------------------------------------------
 

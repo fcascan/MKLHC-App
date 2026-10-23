@@ -17,6 +17,8 @@ import com.mklhc.core.presentation.toUiText
  *   [LinkState.NoAdapter] or has [LinkState.Failed]. While the flow climbs the ladder, drives or recovers on
  *   its own, a second Start would only interrupt it.
  * - [canOpenCockpit]: the kart is identified and accepts driving ([LinkState.KartReady] or [LinkState.Driving]).
+ * - [canChangeAdapter]: the radio is off (same condition as [canStart]), so the choice of the radio adapter can
+ *   change; while the radio is up the "Radio adapter" section is read-only.
  *
  * There are no one-time effects here: Pair and Cockpit are plain navigation callbacks of the Root.
  *
@@ -25,7 +27,8 @@ import com.mklhc.core.presentation.toUiText
  * @property kartInfo what is known about the identified kart, or null before it is identified.
  * @property battery the kart battery, or null before the first report.
  * @property captureEnabled whether packet capture is switched on.
- * @property errorMessage why the last Start failed, or null; cleared by the next Start.
+ * @property adapter the "Radio adapter" section: the mode, the detected USB devices and the status line.
+ * @property errorMessage why the last Start (or adapter change) failed, or null; cleared by the next one.
  */
 @Immutable
 data class LinkScreenState(
@@ -34,6 +37,7 @@ data class LinkScreenState(
     val kartInfo: KartInfoUi? = null,
     val battery: BatteryUi? = null,
     val captureEnabled: Boolean = false,
+    val adapter: AdapterSectionUi = AdapterSectionUi.INITIAL,
     val errorMessage: UiText? = null,
 ) {
     /** True when the radio adapter is not known to be missing or waiting for USB permission. */
@@ -43,6 +47,10 @@ data class LinkScreenState(
     /** True when Start is meaningful: the link is idle at no adapter or has failed. */
     val canStart: Boolean
         get() = linkState == LinkState.NoAdapter || linkState is LinkState.Failed
+
+    /** True when the radio is off, so the adapter choice can change; the same condition as [canStart]. */
+    val canChangeAdapter: Boolean
+        get() = canStart
 
     /** True when the kart accepts driving, so the cockpit can be opened. */
     val canOpenCockpit: Boolean

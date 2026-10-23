@@ -5,7 +5,8 @@ package com.mklhc.core.radio
  *
  * Business logic: radiod is a dumb radio. The app tells it what to do ([AppToRadiod]: open the
  * adapter, set channel/identity, manage the hardware beacon, transmit raw 802.11 frames) and radiod
- * reports back ([RadiodToApp]: readiness, received frames, counters, logs, errors). [IpcCodec]
+ * reports back ([RadiodToApp]: readiness, received frames, counters, logs, errors). The app can also ask
+ * which USB devices radiod sees ([ListDevices], answered by [DeviceList]). [IpcCodec]
  * turns these types into wire bytes and back.
  *
  * Numeric field conventions: unsigned 8 and 16 bit wire fields are modelled as [Int] and range
@@ -139,6 +140,13 @@ sealed interface RadioMessage {
     /** Asks radiod to stop the radio and exit. */
     data object Shutdown : AppToRadiod
 
+    /**
+     * Asks radiod for the USB devices it sees (hubs left out); answered by exactly one [DeviceList] that echoes
+     * [requestId], so a late answer to an earlier request is never taken for this one. Allowed at any time, before or
+     * after [OpenDevice]; it never ends the session.
+     */
+    data class ListDevices(val requestId: UInt) : AppToRadiod
+
     // ---------------------------------------------------------------------------------------
     // radiod -> app
     // ---------------------------------------------------------------------------------------
@@ -217,13 +225,19 @@ sealed interface RadioMessage {
 
     /** An error reported by radiod; fatal errors end the radiod process. */
     data class Error(val code: UInt, val text: String) : RadiodToApp
+
+    /**
+     * radiod's answer to the [ListDevices] with the same [requestId]: every USB device it found, in libusb's order. An
+     * empty list also stands for a scan that failed (radiod then sends a LOG warning too, once per new problem).
+     */
+    data class DeviceList(val requestId: UInt, val devices: List<UsbDeviceEntry>) : RadiodToApp
 }
 
-private fun requireU8(name: String, value: Int) {
+internal fun requireU8(name: String, value: Int) {
     require(value in 0..0xFF) { "$name must fit in u8, was $value" }
 }
 
-private fun requireU16(name: String, value: Int) {
+internal fun requireU16(name: String, value: Int) {
     require(value in 0..0xFFFF) { "$name must fit in u16, was $value" }
 }
 

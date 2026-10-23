@@ -5,6 +5,7 @@ import co.touchlab.kermit.Logger
 import co.touchlab.kermit.Severity
 import co.touchlab.kermit.StaticConfig
 import com.mklhc.core.crypto.CryptoPrimitives
+import com.mklhc.core.domain.UsbId
 import com.mklhc.core.netstack.AddressPlan
 import com.mklhc.core.netstack.Arp
 import com.mklhc.core.netstack.ArpPacket
@@ -72,14 +73,16 @@ class RadioAccessPointTest {
     fun bringUpOpensTheAdapterInitialisesAndWaitsForReady() = runTest {
         val rig = Rig(this)
 
-        val bringUp = launch { rig.ap.bringUp(CHANNEL) }
+        val bringUp = launch { rig.ap.bringUp(CHANNEL, ADAPTER) }
         runCurrent()
 
-        // Until radiod says READY only the device open and INIT have been sent, and bringUp is still waiting.
+        // Until radiod says READY only the device open (of the adapter given) and INIT have been sent, and bringUp is
+        // still waiting.
         assertEquals(
-            listOf<RadioMessage.AppToRadiod>(RadioMessage.OpenDevice(0x0BDA, 0xC812), RadioMessage.Init(CHANNEL, 20, 0)),
+            listOf<RadioMessage.AppToRadiod>(RadioMessage.OpenDevice(0x2357, 0x012D), RadioMessage.Init(CHANNEL, 20, 0)),
             rig.radio.sentMessages,
         )
+        assertTrue(rig.logs.has("bringUp(): opening the adapter -> adapter=2357:012d channel=$CHANNEL"), rig.logs.text())
         assertTrue(bringUp.isActive)
 
         rig.radio.emitEvent(READY)
@@ -95,7 +98,7 @@ class RadioAccessPointTest {
         val rig = Rig(this)
         var failure: Throwable? = null
 
-        launch { failure = runCatching { rig.ap.bringUp(CHANNEL) }.exceptionOrNull() }
+        launch { failure = runCatching { rig.ap.bringUp(CHANNEL, ADAPTER) }.exceptionOrNull() }
         runCurrent()
         rig.radio.emitEvent(RadioMessage.Error(code = 7u, text = "cannot open the adapter"))
         runCurrent()
@@ -111,7 +114,7 @@ class RadioAccessPointTest {
         val rig = Rig(this, options = RadioOptions(readyTimeoutMs = 5_000L))
         var failure: Throwable? = null
 
-        launch { failure = runCatching { rig.ap.bringUp(CHANNEL) }.exceptionOrNull() }
+        launch { failure = runCatching { rig.ap.bringUp(CHANNEL, ADAPTER) }.exceptionOrNull() }
         runCurrent()
         advanceTimeBy(5_001L)
         runCurrent()
@@ -125,7 +128,7 @@ class RadioAccessPointTest {
     fun stopWhileABringUpWaitsForReadyFailsItAndRecordsNothing() = runTest {
         val rig = Rig(this)
         var failure: Throwable? = null
-        val bringUp = launch { failure = runCatching { rig.ap.bringUp(CHANNEL) }.exceptionOrNull() }
+        val bringUp = launch { failure = runCatching { rig.ap.bringUp(CHANNEL, ADAPTER) }.exceptionOrNull() }
         runCurrent()
         assertTrue(bringUp.isActive, "waiting for READY")
 
@@ -153,7 +156,7 @@ class RadioAccessPointTest {
         // stop generation, checked under the lock, keeps the bring-up from recording its channel.
         val rig = Rig(this, radioLink = { fake -> ReadyDuringShutdownRadioLink(fake) })
         var failure: Throwable? = null
-        launch { failure = runCatching { rig.ap.bringUp(CHANNEL) }.exceptionOrNull() }
+        launch { failure = runCatching { rig.ap.bringUp(CHANNEL, ADAPTER) }.exceptionOrNull() }
         runCurrent()
 
         rig.ap.stop()
@@ -171,10 +174,10 @@ class RadioAccessPointTest {
     fun bringUpBeforeStartStartingTwiceAndAnUnusableChannelAreRefused() = runTest {
         val rig = Rig(this, autoStart = false)
 
-        assertFailsWith<IllegalStateException> { rig.ap.bringUp(CHANNEL) }
+        assertFailsWith<IllegalStateException> { rig.ap.bringUp(CHANNEL, ADAPTER) }
         rig.ap.start(backgroundScope)
         assertFailsWith<IllegalStateException> { rig.ap.start(backgroundScope) }
-        assertFailsWith<IllegalArgumentException> { rig.ap.bringUp(3) }
+        assertFailsWith<IllegalArgumentException> { rig.ap.bringUp(3, ADAPTER) }
         assertTrue(rig.radio.sentMessages.isEmpty())
     }
 
@@ -1301,7 +1304,7 @@ class RadioAccessPointTest {
 
         /** Runs [RadioAccessPoint.bringUp] to completion with radiod answering READY. */
         fun bringUp() {
-            val job = test.backgroundScope.launch { ap.bringUp(CHANNEL) }
+            val job = test.backgroundScope.launch { ap.bringUp(CHANNEL, ADAPTER) }
             test.runCurrent()
             radio.emitEvent(READY)
             test.runCurrent()
@@ -1395,6 +1398,7 @@ class RadioAccessPointTest {
         val BSSID: MacAddress = ApTestFixtures.BSSID
         val STATION: MacAddress = FakeStation.DEFAULT_MAC
         val READY = RadioMessage.Ready("rtl8812cu", "fw-1", "devourer-test")
+        val ADAPTER = UsbId(0x2357, 0x012D)
         const val CHANNEL = 6
         const val RSSI_DBM = -42
         const val RCD_PORT = 5201

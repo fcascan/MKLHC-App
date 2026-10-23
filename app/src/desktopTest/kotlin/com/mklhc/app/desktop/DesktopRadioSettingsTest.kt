@@ -1,5 +1,7 @@
 package com.mklhc.app.desktop
 
+import co.touchlab.kermit.Logger
+import com.mklhc.app.LogCapture
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -10,20 +12,18 @@ import kotlin.test.assertTrue
 
 /**
  * [DesktopRadioSettings.parse] from injected environments, system properties and arguments: the defaults on each
- * operating system (from any host), the overrides, and values that cannot be used failing with the variable's name.
+ * operating system (from any host), the overrides, the retired `MKLHC_RADIO` (reported, then ignored), and values that
+ * cannot be used failing with the variable's name.
  */
 class DesktopRadioSettingsTest {
 
     // ---- Defaults ------------------------------------------------------------------------------------
 
     @Test
-    fun onWindowsTheDefaultsAreTheReferenceAdapterTheRadiodReleaseBuildAndAppDataMklhc() {
+    fun onWindowsTheDefaultsAreTheRadiodReleaseBuildAndAppDataMklhc() {
         val settings = parse(env = mapOf("APPDATA" to APPDATA), os = WINDOWS)
 
         assertFalse(settings.demo)
-        assertEquals(0x0BDA, settings.radioVid)
-        assertEquals(0xC812, settings.radioPid)
-        assertEquals("0bda:c812", settings.radioId)
         assertEquals(Path.of(APPDATA, "MKLHC"), settings.dataDirectory)
         assertEquals(Path.of(APPDATA, "MKLHC", "pairing.preferences_pb"), settings.pairingStorePath)
         // No build exists: the path names where the build is expected, so the runtime can report it.
@@ -83,17 +83,14 @@ class DesktopRadioSettingsTest {
     // ---- Overrides -----------------------------------------------------------------------------------
 
     @Test
-    fun theVariablesOverrideTheAdapterRadiodAndDataDirectory() {
+    fun theVariablesOverrideRadiodAndTheDataDirectory() {
         val radiod = absolute("tools", "radiod.exe")
         val data = absolute("data", "mklhc")
         val settings = parse(
-            env = mapOf("MKLHC_RADIO" to "2357:012D", "MKLHC_RADIOD" to radiod.toString(), "MKLHC_DATA_DIR" to data.toString()),
+            env = mapOf("MKLHC_RADIOD" to radiod.toString(), "MKLHC_DATA_DIR" to data.toString()),
             os = WINDOWS,
         )
 
-        assertEquals(0x2357, settings.radioVid)
-        assertEquals(0x012D, settings.radioPid)
-        assertEquals("2357:012d", settings.radioId)
         assertEquals(radiod, settings.radiodExecutable)
         assertEquals(data, settings.dataDirectory)
         assertEquals(data.resolve("pairing.preferences_pb"), settings.pairingStorePath)
@@ -160,16 +157,34 @@ class DesktopRadioSettingsTest {
         assertFalse(parse(env = mapOf("MKLHC_DEMO" to "false")).demo)
     }
 
-    // ---- Values that cannot be used ------------------------------------------------------------------
+    // ---- The retired adapter variable ----------------------------------------------------------------
 
     @Test
-    fun aMalformedRadioIdFailsNamingTheVariable() {
-        listOf("0bda-c812", "bda:c812", "0bda:c8125", "radio", "0bda:").forEach { value ->
-            val failure = assertFailsWith<IllegalArgumentException>(value) { parse(env = mapOf("MKLHC_RADIO" to value)) }
-            assertTrue(failure.message.orEmpty().contains("MKLHC_RADIO"), failure.message)
-            assertTrue(failure.message.orEmpty().contains(value), failure.message)
+    fun theRetiredRadioVariableIsReportedAndIgnoredWhateverItsValue() {
+        listOf("2357:012D", "0bda-c812", "radio").forEach { value ->
+            val logs = LogCapture()
+
+            val settings = parse(env = mapOf("MKLHC_RADIO" to value, "APPDATA" to APPDATA), os = WINDOWS, log = logs.logger())
+
+            assertEquals(parse(env = mapOf("APPDATA" to APPDATA), os = WINDOWS), settings, "the value changes nothing -> value=$value")
+            assertTrue(
+                logs.has("WARN: parse(): MKLHC_RADIO is no longer used; choose the adapter on the Kart link screen -> value=$value"),
+                logs.text(),
+            )
         }
     }
+
+    @Test
+    fun anUnsetOrBlankRadioVariableIsNotReported() {
+        val logs = LogCapture()
+
+        parse(log = logs.logger())
+        parse(env = mapOf("MKLHC_RADIO" to "  "), log = logs.logger())
+
+        assertFalse(logs.has("MKLHC_RADIO"), logs.text())
+    }
+
+    // ---- Values that cannot be used ------------------------------------------------------------------
 
     @Test
     fun aDemoFlagThatIsNeitherOneNorZeroFailsNamingTheVariable() {
@@ -205,11 +220,13 @@ class DesktopRadioSettingsTest {
         os: String = LINUX,
         args: List<String> = emptyList(),
         existing: Set<Path> = emptySet(),
+        log: Logger = LogCapture().logger(),
     ): DesktopRadioSettings = DesktopRadioSettings.parse(
         env = env,
         systemProperties = mapOf("os.name" to os, "user.home" to HOME, "user.dir" to workingDirectory().toString()),
         args = args,
         isRegularFile = { it in existing },
+        log = log,
     )
 
     private companion object {

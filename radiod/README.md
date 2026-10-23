@@ -31,6 +31,7 @@ Earlier checks, made without devourer with MSVC on Windows, still hold:
 |---|---|
 | `src/Ipc.h`, `src/Ipc.cpp` | Framed message codec, byte-identical to the Kotlin `IpcCodec` |
 | `src/Radio.h`, `src/Radio.cpp` | Wraps devourer: open, init, beacon, TX queue and thread, RX callback, counters |
+| `src/UsbScan.h`, `src/UsbScan.cpp` | LIST_DEVICES: enumerates the USB devices on a libusb context of its own, trial-opening those that may be adapters |
 | `src/main.cpp` | Argument parsing, AF_UNIX connect, HELLO check, command dispatch, STATUS and LOG forwarding |
 | `CMakeLists.txt` | Builds devourer (as a subdirectory) and the `radiod` executable |
 
@@ -82,11 +83,28 @@ extra arguments are logged and ignored. The socket path must be shorter than 108
 
 ## Protocol notes
 
-The wire format is documented in `src/Ipc.h`. Behavior that is radiod's own choice:
+The wire format is documented in `src/Ipc.h`. The protocol version is 2 (version 2 added LIST_DEVICES and
+DEVICE_LIST); the app and radiod must carry the same version or the handshake fails. Behavior that is
+radiod's own choice:
 
 - The app speaks first. `DesktopRadioLink` sends HELLO (version, token) right after radiod connects;
   radiod checks the version and token and answers a mismatch with ERROR code 1, then exits. radiod does
   not send HELLO itself.
+- LIST_DEVICES (`0x000A`, `u32 requestId`) is answered by exactly one DEVICE_LIST (`0x0106`): the same
+  `u32 requestId`, `u32 count`, then per device `u16 vid, u16 pid, u8 bus, u8 address, u8 deviceClass,
+  u8 access`. The echoed id lets the app ignore a late answer to an earlier request. radiod scans on a
+  temporary libusb context of its own (not the radio's) and leaves hubs (device class `0x09`) out. Only a
+  device with a vendor-specific interface (class `0xFF`, in its active or else first configuration) gets a
+  trial `libusb_open` + `libusb_close` with no claim; every other device is reported 5 "not probed" and is
+  never opened (no wake-ups of suspended devices, no grab of WinUSB's single handle of unrelated devices).
+  Access codes: 0 openable, 1 driver unsupported (`LIBUSB_ERROR_NOT_SUPPORTED`; on Windows, not bound to
+  WinUSB), 2 access denied (`LIBUSB_ERROR_ACCESS` outside Windows; on Linux, a missing udev rule), 3 in use
+  by another program (`LIBUSB_ERROR_ACCESS` on Windows, where WinUSB grants one handle at a time;
+  `LIBUSB_ERROR_BUSY` elsewhere), 4 any other error, 5 not probed. It is allowed before and after
+  OPEN_DEVICE; the radio's own open adapter then reports whatever libusb says (in use on Windows). It is
+  never fatal: a scan that fails answers with an empty list. Scan problems are sent as a LOG warning only
+  when they differ from the previous scan's, and nothing else is logged per scan (the app scans about every
+  2 s while the radio is down).
 - TX_FRAME `flags` bit 0 (`0x01`) means "do not expect an ACK". Group-addressed frames are always sent
   without ACK; unicast frames are sent with hardware retries. Other bits are reserved.
 - TX_FRAME `rate` is a devourer rate string ("6M", "MCS3", ...). An unparsable rate falls back to 6M with a

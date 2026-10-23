@@ -1,6 +1,14 @@
 package com.mklhc.core.radio
 
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.updateAndGet
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * App-side handle on the `radiod` radio helper: the seam between app logic and the raw 802.11 radio.
@@ -26,7 +34,7 @@ interface RadioLink {
 
     /**
      * Notifications from radiod other than frames: [RadioMessage.Ready], [RadioMessage.Status],
-     * [RadioMessage.Log] and [RadioMessage.Error].
+     * [RadioMessage.Log], [RadioMessage.Error] and [RadioMessage.DeviceList].
      */
     val events: Flow<RadioMessage>
 
@@ -59,4 +67,35 @@ interface RadioLink {
 
     /** Asks radiod to stop the radio and exit. */
     suspend fun shutdown()
+
+    /**
+     * Asks radiod which USB devices it sees. The answer, one [RadioMessage.DeviceList] echoing [requestId], arrives on
+     * [events]; [requestDeviceList] picks the id, sends this and waits for that answer. Allowed at any time, before or
+     * after [openDevice].
+     */
+    suspend fun listDevices(requestId: UInt)
+}
+
+/** The last LIST_DEVICES request id handed out; shared by every link, u32 and wrapping like the wire field. */
+private val lastDeviceListRequestId = MutableStateFlow(0u)
+
+/**
+ * Sends [RadioLink.listDevices] with a new request id and returns the devices of the [RadioMessage.DeviceList] that
+ * echoes it, or null when none arrives within [timeoutMs].
+ *
+ * It subscribes to [RadioLink.events] before sending, so a reply that comes back at once is not missed. A DEVICE_LIST
+ * with another id (a late answer to an earlier request that timed out, or another caller's) is ignored. Throws like
+ * any command when the link is not connected.
+ */
+suspend fun RadioLink.requestDeviceList(timeoutMs: Long): List<UsbDeviceEntry>? = coroutineScope {
+    val requestId = lastDeviceListRequestId.updateAndGet { it + 1u }
+    val reply = async(start = CoroutineStart.UNDISPATCHED) {
+        events.filterIsInstance<RadioMessage.DeviceList>().first { it.requestId == requestId }
+    }
+    try {
+        listDevices(requestId)
+        withTimeoutOrNull(timeoutMs) { reply.await().devices }
+    } finally {
+        reply.cancel()
+    }
 }

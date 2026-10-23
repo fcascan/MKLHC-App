@@ -17,6 +17,8 @@ kotlin {
             api(project(":core:crypto"))
             // RadioLink is part of the public RadioAccessPoint constructor.
             api(project(":core:radio"))
+            // UsbId names the adapter RadioAccessPoint.bringUp opens. :core:domain depends on nothing, so no cycle.
+            api(project(":core:domain"))
             // RadioAccessPoint implements FrameLink and delivers LinkPayload; FakeStation builds DHCP messages.
             api(project(":core:netstack"))
             // CoroutineScope and StateFlow are part of the public RadioAccessPoint API.

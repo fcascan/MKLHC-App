@@ -1,5 +1,6 @@
 package com.mklhc.app.spike
 
+import com.mklhc.core.domain.UsbId
 import com.mklhc.core.wifi_ap.ap.ApConfig
 import com.mklhc.core.wifi_ap.ap.RadioOptions
 import java.nio.file.Path
@@ -20,10 +21,9 @@ class SpikeArgsTest {
     fun noArgumentsGiveTheReferenceAdapterOnChannel6() {
         val args = parseSpikeArgs(emptyList())
 
-        assertEquals(RadioOptions.DEFAULT_VID, args.vid)
-        assertEquals(RadioOptions.DEFAULT_PID, args.pid)
-        assertEquals(0x0BDA, args.vid)
-        assertEquals(0xC812, args.pid)
+        assertEquals(SpikeArgs.DEFAULT_VID, args.vid)
+        assertEquals(SpikeArgs.DEFAULT_PID, args.pid)
+        assertEquals(UsbId(0x0BDA, 0xC812), args.adapter)
         assertEquals(6, args.channel)
         assertEquals(0, args.txPowerIndex)
         assertEquals(ApConfig.DEFAULT_BEACON_INTERVAL_TU, args.beaconIntervalTu)
@@ -55,6 +55,7 @@ class SpikeArgsTest {
         assertEquals(Path.of("C:\\tools\\radiod.exe"), args.radiod)
         assertEquals(0x2357, args.vid)
         assertEquals(0x012D, args.pid)
+        assertEquals(UsbId(0x2357, 0x012D), args.adapter, "the adapter the bring-up opens")
         assertEquals(11, args.channel)
         assertEquals(20, args.txPowerIndex)
         assertEquals(50, args.beaconIntervalTu)

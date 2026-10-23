@@ -83,6 +83,32 @@ class RadioMessageTest {
     }
 
     @Test
+    fun `out of range USB device fields are rejected on construction`() {
+        fun entry(vid: Int = 1, pid: Int = 2, bus: Int = 3, address: Int = 4, deviceClass: Int = 0) =
+            UsbDeviceEntry(vid = vid, pid = pid, bus = bus, address = address, deviceClass = deviceClass, access = UsbAccess.OPENABLE)
+
+        assertFailsWith<IllegalArgumentException> { entry(vid = -1) }
+        assertFailsWith<IllegalArgumentException> { entry(vid = 0x10000) }
+        assertFailsWith<IllegalArgumentException> { entry(pid = 0x10000) }
+        assertFailsWith<IllegalArgumentException> { entry(bus = 256) }
+        assertFailsWith<IllegalArgumentException> { entry(address = -1) }
+        assertFailsWith<IllegalArgumentException> { entry(deviceClass = 256) }
+        assertThat(entry(vid = 0xFFFF, pid = 0, bus = 255, address = 0, deviceClass = 255).vid).isEqualTo(0xFFFF)
+    }
+
+    @Test
+    fun `UsbAccess maps wire codes and falls back to UNKNOWN`() {
+        assertThat(UsbAccess.fromCode(0)).isEqualTo(UsbAccess.OPENABLE)
+        assertThat(UsbAccess.fromCode(1)).isEqualTo(UsbAccess.DRIVER_UNSUPPORTED)
+        assertThat(UsbAccess.fromCode(2)).isEqualTo(UsbAccess.ACCESS_DENIED)
+        assertThat(UsbAccess.fromCode(3)).isEqualTo(UsbAccess.BUSY)
+        assertThat(UsbAccess.fromCode(4)).isEqualTo(UsbAccess.ERROR)
+        assertThat(UsbAccess.fromCode(5)).isEqualTo(UsbAccess.NOT_PROBED)
+        assertThat(UsbAccess.fromCode(6)).isEqualTo(UsbAccess.UNKNOWN)
+        assertThat(UsbAccess.fromCode(0xFF)).isEqualTo(UsbAccess.UNKNOWN)
+    }
+
+    @Test
     fun `SET_IDENTITY requires exactly 6 bytes`() {
         assertFailsWith<IllegalArgumentException> { RadioMessage.SetIdentity(ByteArray(5)) }
         assertFailsWith<IllegalArgumentException> { RadioMessage.SetIdentity(ByteArray(7)) }

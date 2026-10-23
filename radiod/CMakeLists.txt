@@ -67,7 +67,8 @@ find_package(Threads REQUIRED)
 add_executable(radiod
     src/main.cpp
     src/Ipc.cpp
-    src/Radio.cpp)
+    src/Radio.cpp
+    src/UsbScan.cpp)
 
 target_compile_features(radiod PRIVATE cxx_std_20)
 target_compile_definitions(radiod PRIVATE RADIOD_DEVOURER_VERSION="${RADIOD_DEVOURER_VERSION}")
