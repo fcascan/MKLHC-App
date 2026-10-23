@@ -364,6 +364,35 @@ seconds. The app runs the same cleanup when the operating system ends it (a logo
 but not when it is killed outright: as with the spike, do not stop it with Ctrl+C under Gradle, which on Windows ends it
 without that cleanup; if an adapter keeps beaconing after a hard kill, unplug it.
 
+### Drive the kart
+
+The cockpit's controls answer only while the kart is driving (the status overlay is gone). On the desktop, drive with
+the keyboard, which works both axes at once:
+
+| Key | Does |
+|---|---|
+| W or Up | Forward |
+| S or Down | Reverse |
+| A or Left | Steer left |
+| D or Right | Steer right |
+| Space | Brake light, while held |
+
+A held key is the full value of its axis; the app caps the throttle at the max-throttle setting, half the kart's full
+throttle by default. A key pressed together with Ctrl, Alt or Cmd is a shortcut and does not drive. The on-screen
+steering slider and throttle pedal also work with the mouse, one at a time; whichever of a key and the mouse lets go
+of an axis first returns it to zero.
+
+Letting go means neutral: releasing a key, or the mouse button, returns that axis to zero. Every other way of losing
+the controls also stops the kart:
+- The window or the cockpit loses the focus (another window, a dialog): every key is released, since their key-ups go
+  elsewhere. When the focus comes back, the first press of each key does nothing (it could be the auto-repeat of a key
+  held all along); press it again to drive.
+- The link drops: the cockpit sends neutral and covers the controls. A key still held when it comes back does nothing
+  until it is released and pressed again.
+- The screen stops refreshing the command (its thread hangs): the session sends neutral after 250 ms without a fresh
+  command.
+- The window closes: the kart is powered off (or put to sleep), as described above.
+
 ### Dump the raw video
 
 The desktop app decodes the kart's camera with FFmpeg and shows it in the cockpit; until the first picture decodes

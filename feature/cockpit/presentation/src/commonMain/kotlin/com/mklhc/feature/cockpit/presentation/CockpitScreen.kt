@@ -117,7 +117,9 @@ fun CockpitRoot(
  *
  * The controls are stateless: the values they show come from [state], and the lambdas report what the finger does.
  * [onSteeringRelease] and [onThrottleRelease] are separate so letting go with one thumb does not touch the other
- * axis; the brake button reports its own release through [onBrake] with false.
+ * axis; the brake button reports its own release through [onBrake] with false. The keyboard drives through the same
+ * lambdas ([keyboardDrive]: W/A/S/D or the arrows, the space bar for the brake light), which is how the desktop
+ * drives both axes at once with one mouse.
  *
  * @param state what to render.
  * @param videoAccessUnits the kart's H.264 access units, for the video surface; pass an empty flow in previews.
@@ -141,7 +143,19 @@ fun CockpitScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Box(modifier = modifier.fillMaxSize().background(Color.Black)) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .keyboardDrive(
+                enabled = state.isDriving,
+                onSteering = onSteering,
+                onThrottle = onThrottle,
+                onSteeringRelease = onSteeringRelease,
+                onThrottleRelease = onThrottleRelease,
+                onBrake = onBrake,
+            ),
+    ) {
         VideoSurface(accessUnits = videoAccessUnits, modifier = Modifier.fillMaxSize())
 
         Box(modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(AppDimens.SpacingMedium)) {

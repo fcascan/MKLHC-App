@@ -5,12 +5,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.focus.FocusManager
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.WindowInfo
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.runComposeUiTest
 import androidx.lifecycle.Lifecycle
@@ -47,7 +53,8 @@ import kotlin.test.assertTrue
 /**
  * The cockpit rendered offscreen: [CockpitScreen] must show the HUD and the controls for the state it is given,
  * cover the cockpit with the status overlay while the kart is not driving, and report each interaction through its
- * lambda; [CockpitRoot] must wire a Koin-provided [CockpitViewModel] to a fake session end to end (the module
+ * lambda, for the touch controls and the keyboard alike (including the keyboard's releases on a link drop, a focus
+ * loss and removal); [CockpitRoot] must wire a Koin-provided [CockpitViewModel] to a fake session end to end (the module
  * resolves, the screen follows the session, the controls reach the session as drive commands, and leaving the
  * screen sends neutral). The video is an empty flow: the desktop video surface is only a placeholder.
  */
@@ -219,6 +226,181 @@ class CockpitScreenTest {
         assertTrue(calls.brake.isEmpty())
     }
 
+    // ---- driving with the keyboard ----------------------------------------------------------
+
+    /** The window's focus, as a test controls it. */
+    private class TestWindowInfo : WindowInfo {
+        var focused by mutableStateOf(true)
+        override val isWindowFocused: Boolean get() = focused
+    }
+
+    private fun androidx.compose.ui.test.ComposeUiTest.showScreenWithWindow(
+        state: () -> CockpitState,
+        window: TestWindowInfo = TestWindowInfo(),
+        calls: Calls = Calls(),
+        visible: () -> Boolean = { true },
+        onFocusManager: (FocusManager) -> Unit = {},
+    ): Calls {
+        setContent {
+            onFocusManager(LocalFocusManager.current)
+            CompositionLocalProvider(LocalWindowInfo provides window) {
+                if (visible()) AppTheme {
+                    CockpitScreen(
+                        state = state(),
+                        videoAccessUnits = emptyFlow(),
+                        onSteering = { calls.steering += it },
+                        onThrottle = { calls.throttle += it },
+                        onSteeringRelease = { calls.steeringReleases++ },
+                        onThrottleRelease = { calls.throttleReleases++ },
+                        onBrake = { calls.brake += it },
+                        onBack = { calls.backs++ },
+                    )
+                }
+            }
+        }
+        waitForIdle()
+        return calls
+    }
+
+    @Test
+    fun wasdDrivesBothAxesAtOnceAndEachKeyUpReleasesItsAxis() = runComposeUiTest {
+        val calls = showScreenWithWindow({ drivingState() })
+
+        onRoot().performKeyInput { keyDown(Key.W); keyDown(Key.A) }
+        assertEquals(listOf(1f), calls.throttle)
+        assertEquals(listOf(-1f), calls.steering)
+
+        onRoot().performKeyInput { keyUp(Key.A) }
+        assertEquals(1, calls.steeringReleases)
+        assertEquals(0, calls.throttleReleases, "the throttle key is still down")
+
+        onRoot().performKeyInput { keyUp(Key.W) }
+        assertEquals(1, calls.throttleReleases)
+
+        onRoot().performKeyInput { keyDown(Key.S); keyDown(Key.D); keyUp(Key.S); keyUp(Key.D) }
+        assertEquals(listOf(1f, -1f), calls.throttle)
+        assertEquals(listOf(-1f, 1f), calls.steering)
+    }
+
+    @Test
+    fun theArrowKeysDriveAndTheSpaceBarLightsTheBrake() = runComposeUiTest {
+        val calls = showScreenWithWindow({ drivingState() })
+
+        onRoot().performKeyInput {
+            keyDown(Key.DirectionUp); keyDown(Key.DirectionRight); keyDown(Key.Spacebar)
+            keyUp(Key.Spacebar); keyUp(Key.DirectionRight); keyUp(Key.DirectionUp)
+            keyDown(Key.DirectionDown); keyDown(Key.DirectionLeft)
+        }
+
+        assertEquals(listOf(1f, -1f), calls.throttle)
+        assertEquals(listOf(1f, -1f), calls.steering)
+        assertEquals(listOf(true, false), calls.brake)
+    }
+
+    @Test
+    fun theKeysDoNothingWhileTheKartIsNotDriving() = runComposeUiTest {
+        val calls = showScreenWithWindow({ connectingState() })
+
+        onRoot().performKeyInput { keyDown(Key.W); keyDown(Key.D); keyDown(Key.Spacebar) }
+        onRoot().performKeyInput { keyUp(Key.W); keyUp(Key.D); keyUp(Key.Spacebar) }
+
+        assertTrue(calls.throttle.isEmpty())
+        assertTrue(calls.steering.isEmpty())
+        assertTrue(calls.brake.isEmpty())
+    }
+
+    @Test
+    fun aKeyHeldThroughALinkDropDoesNotDriveWhenDrivingResumes() = runComposeUiTest {
+        var state by mutableStateOf(drivingState())
+        val calls = showScreenWithWindow({ state })
+        onRoot().performKeyInput { keyDown(Key.W) }
+        assertEquals(listOf(1f), calls.throttle)
+
+        state = state.copy(linkState = LinkState.Recovering("control channel closed"))
+        waitForIdle()
+        assertEquals(1, calls.throttleReleases, "leaving Driving releases the held key")
+
+        // The auto-repeat of a key still down is covered by KeyboardDriveTest: the test injection refuses a second down.
+        // Coming back to Driving drives nothing on its own.
+        state = drivingState()
+        waitForIdle()
+        assertEquals(listOf(1f), calls.throttle, "no new throttle until the key comes up and goes down again")
+
+        onRoot().performKeyInput { keyUp(Key.W); keyDown(Key.W) }
+        assertEquals(listOf(1f, 1f), calls.throttle)
+    }
+
+    @Test
+    fun losingTheWindowFocusReleasesTheHeldKeys() = runComposeUiTest {
+        val window = TestWindowInfo()
+        val calls = showScreenWithWindow({ drivingState() }, window)
+        onRoot().performKeyInput { keyDown(Key.W); keyDown(Key.D); keyDown(Key.Spacebar) }
+
+        // Another window takes the focus: the key-ups go there, so the cockpit lets go by itself.
+        window.focused = false
+        waitForIdle()
+
+        assertEquals(1, calls.throttleReleases)
+        assertEquals(1, calls.steeringReleases)
+        assertEquals(listOf(true, false), calls.brake)
+
+        // Back in focus, a key-down may be the auto-repeat of a key held all along: the first press of each key is
+        // ignored, the next one drives.
+        window.focused = true
+        waitForIdle()
+        onRoot().performKeyInput { keyDown(Key.S) }
+        assertEquals(listOf(1f), calls.throttle)
+        onRoot().performKeyInput { keyUp(Key.S); keyDown(Key.S) }
+        assertEquals(listOf(1f, -1f), calls.throttle)
+    }
+
+    @Test
+    fun losingTheCockpitFocusReleasesTheHeldKeys() = runComposeUiTest {
+        var focusManager: FocusManager? = null
+        val calls = showScreenWithWindow({ drivingState() }, onFocusManager = { focusManager = it })
+        onRoot().performKeyInput { keyDown(Key.W) }
+        assertEquals(listOf(1f), calls.throttle)
+
+        // A dialog or another control takes the focus inside the window: the key-ups no longer reach the cockpit.
+        runOnUiThread { focusManager!!.clearFocus(force = true) }
+        waitForIdle()
+
+        assertEquals(1, calls.throttleReleases)
+    }
+
+    @Test
+    fun removingTheScreenReleasesTheHeldKeys() = runComposeUiTest {
+        var shown by mutableStateOf(true)
+        val calls = showScreenWithWindow({ drivingState() }, visible = { shown })
+        onRoot().performKeyInput { keyDown(Key.D) }
+        assertEquals(listOf(1f), calls.steering)
+
+        shown = false
+        waitForIdle()
+
+        assertEquals(1, calls.steeringReleases)
+    }
+
+    @Test
+    fun oppositeKeysCancelToARelease() = runComposeUiTest {
+        val calls = showScreenWithWindow({ drivingState() })
+
+        onRoot().performKeyInput { keyDown(Key.W); keyDown(Key.S) }
+
+        assertEquals(listOf(1f), calls.throttle)
+        assertEquals(1, calls.throttleReleases)
+    }
+
+    @Test
+    fun aDriveKeyWithCtrlIsAShortcutNotDriving() = runComposeUiTest {
+        val calls = showScreenWithWindow({ drivingState() })
+
+        onRoot().performKeyInput { keyDown(Key.CtrlLeft); keyDown(Key.W); keyUp(Key.W); keyUp(Key.CtrlLeft) }
+
+        assertTrue(calls.throttle.isEmpty())
+        assertEquals(0, calls.throttleReleases)
+    }
+
     @Test
     fun theBackButtonIsReported() = runComposeUiTest {
         val calls = showScreen(drivingState())
@@ -313,6 +495,21 @@ class CockpitScreenTest {
         shown = false
         waitForIdle()
 
+        assertEquals(DriveCommand.NEUTRAL, session.lastDriveCommand)
+    }
+
+    @Test
+    fun theKeysReachTheSessionAsDriveCommandsAndKeyUpMeansNeutral() = runComposeUiTest {
+        val session = FakeKartSession(initialLinkState = LinkState.Driving)
+        showRoot(session, TestHost())
+        waitForIdle()
+
+        onRoot().performKeyInput { keyDown(Key.W) }
+        waitForIdle()
+        assertEquals(driveCommandOf(throttle = 1f, steering = 0f, brakeLight = false), session.lastDriveCommand)
+
+        onRoot().performKeyInput { keyUp(Key.W) }
+        waitForIdle()
         assertEquals(DriveCommand.NEUTRAL, session.lastDriveCommand)
     }
 

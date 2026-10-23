@@ -426,3 +426,26 @@ Tests decode synthetic I_PCM streams written by the project (`SyntheticH264`, no
 - core/video/src/desktopMain/kotlin/com/mklhc/core/video/VideoSurface.desktop.kt
 - core/video/build.gradle.kts
 - THIRD_PARTY_NOTICES.md
+
+## The cockpit drives with the keyboard; a key drives only if pressed while driving and focused
+
+- id: cockpit-keyboard-drive-pressed-while-driving-and-focused-20261023
+- type: decision
+- status: active
+- platform: kmp
+- area: cockpit
+- date: 2026-10-23
+
+### Decision
+The shared cockpit screen (commonMain, so also a phone's hardware keyboard) takes the keyboard through `Modifier.keyboardDrive`: W/Up forward, S/Down reverse, A/Left and D/Right steering, Space the brake light; a held key is the full axis (the session applies max-throttle and expo), opposite keys cancel, a key-up is the axis's release callback (release means neutral, the touch controls' contract), only changes are reported (the ViewModel keeps a held command alive). A key-down with Ctrl/Alt/Meta is not driving; a key-up always counts. Safety rule: a key drives only if it went down while the kart was Driving and the cockpit had the focus. Leaving Driving releases the held keys and ignores them until they come up; losing the window or cockpit focus releases everything and ignores EVERY key until it comes up (after the focus returns, the first press of each key does nothing); leaving the composition releases everything. `focusTarget()` rather than `focusable()`, so the full-screen root adds no accessibility semantics.
+
+### Reason
+One mouse cannot steer and throttle at once, so the desktop could not really drive. The OS auto-repeats a held key as key-downs with no repeat flag in Compose's common KeyEvent, so a key held across a link drop or a focus switch would otherwise restart the kart by itself; after a focus loss the key-ups went elsewhere, so which keys are down is unknown and all must be pressed afresh. On the desktop a window switch is a temporary AWT focus loss that keeps Compose's own focus, so the window focus (`LocalWindowInfo.isWindowFocused`) is watched separately.
+
+### Verified
+`KeyboardDriveTest` (11, pure state) and `CockpitScreenTest` (keyboard section and a Root end-to-end test through Koin); the compose-ui-test key injection refuses a second key-down of a held key, so the auto-repeat is tested at the state level only. Not yet driven on hardware.
+
+### Files
+- feature/cockpit/presentation/src/commonMain/kotlin/com/mklhc/feature/cockpit/presentation/KeyboardDrive.kt
+- feature/cockpit/presentation/src/commonMain/kotlin/com/mklhc/feature/cockpit/presentation/CockpitScreen.kt
+- docs/HARDWARE_SETUP.md
