@@ -401,12 +401,26 @@ class TcpConnection internal constructor(
         setState(TcpState.SYN_RECEIVED)
     }
 
+    /**
+     * Handles a non-RST segment while our SYN is outstanding (RFC 9293 section 3.10.7.3).
+     *
+     * Business logic: a segment whose ACK does not acknowledge our SYN is answered with `<SEQ=SEG.ACK><CTL=RST>` and
+     * discarded, with or without a SYN. The case that matters is a peer that still holds an old connection on the same
+     * four-tuple because our RST for it was lost (the kart out of range when the session reset it): it answers our SYN
+     * with a challenge ACK of that old connection, our RST clears it, and the next SYN retransmission opens the new
+     * one. Without the RST every retransmission earns the same challenge ACK and the connect never completes.
+     */
     private suspend fun onSegmentSynSent(segment: TcpSegment) {
-        if (!segment.isSyn) return
         if (segment.isAck && !(seqLt(sndUna, segment.acknowledgmentNumber) && seqLeq(segment.acknowledgmentNumber, sndNxt))) {
-            log.d { "onSegmentSynSent(): SYN with an unacceptable ACK -> ack=${segment.acknowledgmentNumber} sndUna=$sndUna sndNxt=$sndNxt" }
+            log.i {
+                "onSegmentSynSent(): unacceptable ACK while connecting, resetting the peer's stale connection -> " +
+                    "localPort=$localPort peer=$peer:$peerPort ack=${segment.acknowledgmentNumber} sndUna=$sndUna " +
+                    "sndNxt=$sndNxt isSyn=${segment.isSyn}"
+            }
+            sendRstForUnacceptableAck(segment)
             return
         }
+        if (!segment.isSyn) return
         irs = segment.sequenceNumber
         rcvNxt = add(irs, 1)
         ackValid = true
@@ -589,6 +603,12 @@ class TcpConnection internal constructor(
 
     private suspend fun sendRst() {
         send(rstSegment())
+    }
+
+    /** The RST for a segment whose ACK is unacceptable in SYN_SENT: its ACK number as our sequence, no ACK of ours. */
+    private suspend fun sendRstForUnacceptableAck(segment: TcpSegment) {
+        if (terminated) return
+        send(TcpSegment(localPort, peerPort, segment.acknowledgmentNumber, 0, TcpSegment.RST, 0))
     }
 
     /** The RST that tells the peer to drop this connection: our next sequence number, acknowledging once a SYN was seen. */

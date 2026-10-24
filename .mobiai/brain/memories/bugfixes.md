@@ -238,3 +238,19 @@ OpenKart connects to the kart's services with `retry_connect` (util.py: 10 attem
 - core/data/src/commonTest/kotlin/com/mklhc/core/data/session/FakeKart.kt
 - core/data/src/commonTest/kotlin/com/mklhc/core/data/session/KartSessionRepositoryTest.kt
 - core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
+
+## SYN_SENT drops a challenge ACK, so a kart holding a stale connection never reconnects
+
+- id: syn-sent-drops-a-challenge-ack-so-a-kart-holding-a-stale-con-20261024-044659
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: netstack
+- date: 2026-10-24
+
+Symptom (hardware run 2026-10-24 01:19): after driving out of range and back, the kart rejoined, took the DHCP lease and completed the RCD handshake on 5202 every cycle (its LED showed connected), but the control connect from the fixed local port 41003 to the kart's 5103 got no answer and timed out after 5 s, in a loop that never recovered. Root cause: out of range the link was one-way (the kart's frames still arrived, ours did not), so the RSTs the session sent when it tore down 41003/41007 never reached the kart, which kept the old 41003-5103 connection ESTABLISHED. SessionConfig uses the same local port on every attempt, so each new SYN hit that stale four-tuple; the kart answers such a SYN with a challenge ACK (RFC 5961), and TcpConnection.onSegmentSynSent returned early on any segment without SYN, dropping it with no log line. Fix: in SYN_SENT a segment whose ACK is outside ISS < SEG.ACK <= SND.NXT (with or without SYN) is answered with <SEQ=SEG.ACK><CTL=RST> and discarded (RFC 9293 3.10.7.3); that RST clears the kart's stale connection and the next SYN retransmission connects. Log line: 'onSegmentSynSent(): unacceptable ACK while connecting'. Tests: TcpConnectionDirectTest aChallengeAckInSynSentIsResetAndTheRetransmittedSynThenConnects and aSynAckWithAnUnacceptableAckInSynSentIsReset; gate green. Status: unit-tested only, NOT yet confirmed on hardware. If the out-of-range recovery still fails there, the fallback is a different local port per connect attempt (OpenKart uses ephemeral ports).
+
+### Files
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
+- core/netstack/src/commonTest/kotlin/com/mklhc/core/netstack/tcp/TcpConnectionDirectTest.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/SessionConfig.kt

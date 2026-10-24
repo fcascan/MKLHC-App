@@ -89,14 +89,24 @@ class TcpConnectionDirectTest {
         /** A sequence number [n] octets ahead of the connection's current rcvNxt (wrapping). */
         fun aheadOfRcvNxt(n: Int): Long = connection.add(connectionRcvNxt, n)
 
-        fun synAck(window: Int) = TcpSegment(
+        fun synAck(window: Int, ack: Long = connection.add(localIss, 1)) = TcpSegment(
             sourcePort = peerPort,
             destinationPort = localPort,
             sequenceNumber = peerIss,
-            acknowledgmentNumber = connection.add(localIss, 1),
+            acknowledgmentNumber = ack,
             flags = TcpSegment.SYN or TcpSegment.ACK,
             window = window,
             maxSegmentSize = 1460,
+        )
+
+        /** The pure ACK a peer still holding an old connection on this four-tuple answers our SYN with: it acknowledges [ack]. */
+        fun challengeAck(ack: Long) = TcpSegment(
+            sourcePort = peerPort,
+            destinationPort = localPort,
+            sequenceNumber = 424_242L,
+            acknowledgmentNumber = ack,
+            flags = TcpSegment.ACK,
+            window = 0xFFFF,
         )
 
         /** A pure ACK that acknowledges only our SYN (no data) but advertises a new [window]. */
@@ -230,6 +240,48 @@ class TcpConnectionDirectTest {
         peer.feed(peer.synAck(window = 0xFFFF))
         assertEquals(TcpState.ESTABLISHED, peer.connection.state.value)
         assertTrue(result.isCompleted && result.getCompleted().isSuccess, "connect() returned")
+    }
+
+    // ---- An unacceptable ACK in SYN_SENT is answered with a RST ------------------------------
+
+    /**
+     * A peer that still holds an old connection on the same four-tuple (our RST for it was lost) answers our SYN
+     * with a challenge ACK of that old connection. RFC 9293 section 3.10.7.3: we reset it with `<SEQ=SEG.ACK><CTL=RST>`,
+     * which clears the peer's stale connection, and the next SYN retransmission opens the new one.
+     */
+    @Test
+    fun aChallengeAckInSynSentIsResetAndTheRetransmittedSynThenConnects() = runTest {
+        val peer = DirectPeer(this)
+        val result = peer.beginActiveOpen()
+        val staleAck = 777_777L
+
+        peer.feed(peer.challengeAck(ack = staleAck))
+
+        val rst = peer.outbound.single { it.isRst }
+        assertEquals(staleAck, rst.sequenceNumber, "the RST carries the unacceptable ACK as its sequence number")
+        assertEquals(TcpSegment.RST, rst.flags, "the RST carries no ACK")
+        assertEquals(TcpState.SYN_SENT, peer.connection.state.value, "the connection keeps waiting for its SYN-ACK")
+
+        advanceTimeBy(201.milliseconds)
+        runCurrent()
+        assertTrue(peer.synCount() >= 2, "the SYN is retransmitted after the RTO")
+
+        peer.feed(peer.synAck(window = 0xFFFF))
+        assertEquals(TcpState.ESTABLISHED, peer.connection.state.value)
+        assertTrue(result.isCompleted && result.getCompleted().isSuccess, "connect() returned")
+    }
+
+    @Test
+    fun aSynAckWithAnUnacceptableAckInSynSentIsReset() = runTest {
+        val peer = DirectPeer(this)
+        peer.beginActiveOpen()
+        val wrongAck = 123_456L
+
+        peer.feed(peer.synAck(window = 0xFFFF, ack = wrongAck))
+
+        val rst = peer.outbound.single { it.isRst }
+        assertEquals(wrongAck, rst.sequenceNumber, "the RST carries the unacceptable ACK as its sequence number")
+        assertEquals(TcpState.SYN_SENT, peer.connection.state.value, "the connection keeps waiting for its SYN-ACK")
     }
 
     @Test

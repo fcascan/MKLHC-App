@@ -52,3 +52,6 @@ spike-*-qr.svg
 
 # MobiAI generated code graph (regenerable; brain/ is kept on purpose)
 .mobiai/graph/
+
+# Claude Code: the shared settings and hooks are tracked, each machine's own permissions are not
+.claude/settings.local.json

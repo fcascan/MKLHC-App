@@ -1,35 +1,30 @@
-# Working with the author on MKLHC-App
+# CLAUDE.md
 
-Instructions for every agent session in this repository. They come from how the author works; follow them exactly.
+How to work in this repository is in AGENTS.md, for every assistant. Read it and follow it exactly:
 
-## Commits: the author commits, the agent hands over the message
+@AGENTS.md
 
-- The author runs `git add -A`, commits and pushes himself, at every gate. The agent never commits or pushes, and
-  subagents never run git at all, not even read-only commands.
-- **Every time there are uncommitted changes when the agent stops, its final reply contains the complete commit
-  message in a fenced block, ready to paste.** No exception: not "after the review", not "in the next turn".
-- **Where it goes:** in the final reply text, the last thing the author reads. When a change is pending, the turn
-  ends WITHOUT a next-step question box (in the desktop app, `wrap_up` with only a recap, no `ask` and no buttons):
-  a question box ends the turn and hides everything written around it, so a message written before it is lost. The
-  next-step question goes in plain text after the commit message.
-- Before ending any turn, check: are there uncommitted changes (`git status --short`)? If yes, is the full message in
-  the final reply? If not, write it.
-- Format: `[tag] subject` (tags: feat, fix, docs, build, chore), a lead sentence, then bullets with the changes;
-  name the origin of any ported or adapted code. No `Co-Authored-By` trailer and no mention of any AI or tool.
-- Say which files the commit covers and whether any are new (untracked), so `git add -A` picks them up.
+## Claude Code specifics
 
-## Other standing rules
-
-- Never name the kart's manufacturer, console or game anywhere (code, docs, commits, UI); say "the kart".
-- Never log or print seeds, PSKs, keys, the master secret, tokens or device identities. Never paste a pairing
-  payload into an online service.
-- Real captures (`spike-captures/`, `*.viddump`, `*.pcap`) hold decrypted traffic or the camera picture: they stay
-  local and never go into the repository or a test.
-- Work mechanic: test first, one model per subagent, a two-stage review (spec, then code quality), then a gate with
-  forced reruns (`.\gradlew.bat <module>:desktopTest --rerun ... desktopTest testDebugUnitTest --continue`).
-- On hardware: stop the desktop app by closing its window, never with Ctrl+C under Gradle (it leaves the adapter
-  beaconing until unplugged); confirm the beacon is off after every run.
-- Replies to the author are in Spanish; code, comments, commit messages and repository docs are in English. Longer
-  guides for the author go in the git-ignored `.ia-docs/`.
-- The plan and its backlog: `.ia-docs/plans/2026-10-14-mklhc-app-implementation-plan.md`; project memory:
-  `.mobiai/brain/memories/`.
+- **Nothing but the plain-text next-step question comes after the commit message.** When a change is pending, the turn
+  ends WITHOUT a
+  next-step question box (in the desktop app, `wrap_up` with only a recap, no `ask` and no buttons): a question box
+  ends the turn and hides everything written around it, so a message written before it is lost. The commit message
+  goes in the final reply (AGENTS.md section 7), and the next-step question in plain text after it.
+- **Save to the Brain without asking.** At the end of a task, run the matching `mobiai brain save` yourself instead of
+  proposing it; the confirmation MobiAI's own skills pause for is standing here. Report the entry ids and that
+  `.mobiai/brain/` now has changes to commit.
+- **Invoke MobiAI capabilities with the `Skill` tool** (`mobiai-mobile-debugging`, `mobiai-mobile-tdd`,
+  `mobiai-mobile-verification`, ...), not by reading their `SKILL.md`. Where one of them would commit, push or open a
+  PR, AGENTS.md section 2 wins: the author does that.
+- **Subagents** skip the Brain save and the Graph pre-flight: the parent owns both for the whole task, and repeating
+  them only produces duplicate entries. Every brief repeats the rules that bind the subagent (Windows shells, files
+  through Write/Edit, no `cd` prefix, no sleep), forbids git outright, the hardware, `update_plan` and `wrap_up`, and
+  gives the exact scoped test command. One model per subagent; reviews run in two stages, the spec first, then the code
+  quality.
+- **Hardware runs are launched by the author from Android Studio or a normal PowerShell, never from the Claude Terminal
+  panel.** The Claude desktop app is an MSIX package, so a process it starts sees a virtualized `%APPDATA%` and reads
+  another pairing identity than the one the kart is paired with.
+- A `SessionStart` hook (`.claude/settings.json`) runs `.claude/hooks/graph-freshness-check.sh`, which warns when the
+  Graph index is missing, older than the last branch switch, or older than the latest commit. On the first two, run
+  `mobiai graph init` (it writes only inside `.mobiai/graph/`) and mention that you did.

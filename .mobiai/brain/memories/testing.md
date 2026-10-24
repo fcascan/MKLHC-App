@@ -253,3 +253,14 @@ Run the app from Android Studio or a normal terminal; inside the package, reads 
 
 ### Noise still in the log (per datagram, about 30/s each)
 `TelemetryDecoder decode(): type 3 telemetry is not specified yet` (4,735 lines), `LspVideoReassembler append(): surplus octets trimmed` (the last datagram's padding, 4,613), and `CCMP rejected a frame ... retry=true reason=PN replay detected` at warn (1,632, 3 % of the 54,327 decrypted frames: the kart retransmitting frames already received; one with retry=false).
+
+## Out-of-range drops on hardware: how the kart's control connection comes back
+
+- id: out-of-range-drops-on-hardware-how-the-kart-s-control-connec-20261024-050211
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: session
+- date: 2026-10-24
+
+Hardware run 2026-10-24 ~02:00, after the SYN_SENT RST fix (bugfix syn-sent-drops-a-challenge-ack-so-a-kart-holding-a-stale-con-20261024-044659): three out-of-range drops, each back to Driving by itself once the signal returned. Pattern per recovery: the kart deauths, reassociates, leases, handshakes RCD on 5202, then refuses the first SYN to 5103 once (handleRst connection refused) and accepts the retry 500 ms later from the same local port 41003. The stale-connection case of 01:19 did not recur: once the kart sent a segment on its old 41003 connection and TcpEndpoint.sendRstTo cleared it, the other two times our teardown RSTs reached the kart. So the new 'onSegmentSynSent(): unacceptable ACK while connecting' path is still unconfirmed on hardware; look for that line followed by 'connection established -> localPort=41003' in a future out-of-range log.

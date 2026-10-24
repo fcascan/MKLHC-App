@@ -1,8 +1,11 @@
 {
   "version": 1,
   "project_name": "MKLHC-App",
-  "project_type": "unknown",
-  "platforms": [],
+  "project_type": "kmp",
+  "platforms": [
+    "android",
+    "shared"
+  ],
   "rules": [
     "Prioritize clean architecture",
     "Prepare code for testing",
@@ -10,5 +13,5 @@
     "Respect existing project conventions"
   ],
   "created_at": "2026-10-14T22:33:18Z",
-  "updated_at": "2026-10-14T22:33:18Z"
+  "updated_at": "2026-10-24T03:59:26Z"
 }

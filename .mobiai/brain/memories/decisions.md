@@ -533,3 +533,37 @@ CockpitViewModelTest (release zero at once, the brake override and its new-press
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
 - core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
 - docs/HARDWARE_SETUP.md
+
+## Agent instructions live in AGENTS.md; the Brain is written only through the CLI
+
+- id: agent-instructions-live-in-agents-md-the-brain-is-written-on-20261024-042729
+- type: architecture_decision
+- status: active
+- platform: kmp
+- area: workflow
+- date: 2026-10-24
+
+### Decision
+How agents work in this repository is written in `AGENTS.md`, for every assistant: MobiAI on every task (Brain read
+before, saved after, with a fixed `--area` list), who runs what (the agent runs the tests and the gate, the author the
+hardware and git), Kermit logging rules (including that the desktop log file decides what leaves the machine), code
+conventions (comments never cite the plan), a project map with the commands, and the commit hand-over. `CLAUDE.md`
+imports it with `@AGENTS.md` and adds only what is Claude-specific. A `SessionStart` hook
+(`.claude/hooks/graph-freshness-check.sh`) warns when the Graph index is missing or older than the last checkout or
+commit. Brain entries are written only through `mobiai brain save`; a superseded entry gets a new save and
+`mobiai brain promote <id> --status deprecated` on the old one, never a hand edit of `memories/*.md`.
+### Reason
+The rules lived in the author's personal skills and in one machine's agent memory, so another machine or another
+assistant would not find them. Several earlier entries were maintained by hand, which the CLI does not expect.
+### Alternatives considered
+- One copy of the rules per tool (`GEMINI.md`, `.cursorrules`, Copilot instructions): rejected, the copies drift;
+  Codex, Cursor, Copilot and Junie read `AGENTS.md` directly.
+- Keeping the hook script in `.mobiai/`: rejected, `.mobiai/` belongs to MobiAI.
+
+Status: in place; the hook was tested by hand on a scratch repository, not yet seen firing at a real session start.
+
+### Files
+- AGENTS.md
+- CLAUDE.md
+- .claude/settings.json
+- .claude/hooks/graph-freshness-check.sh
