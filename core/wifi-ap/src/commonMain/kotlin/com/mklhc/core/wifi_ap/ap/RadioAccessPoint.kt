@@ -372,6 +372,21 @@ class RadioAccessPoint(
     }
 
     /**
+     * Forgets that the radio is up, for a radiod relaunched underneath it that has nothing brought up: the served
+     * network and its station are dropped ([isStationAssociated] turns false at once, so the session sees the kart
+     * leave) and, until the next [bringUp], nothing is transmitted ([send] drops the frame, as with no station) and
+     * [serve] fails. The collectors and the inactivity watchdog keep running. Sends nothing to radiod; safe to call at
+     * any time.
+     */
+    suspend fun radioLost() {
+        val dropped = lock.withLock {
+            forgetRadioState()
+            dropNetwork("radioLost()")
+        }
+        log.i { "radioLost(): the radio is gone, nothing is served until it is brought up again -> droppedStation=$dropped" }
+    }
+
+    /**
      * Drops the station and forgets the network and the radio state, stops the beacon, asks radiod to shut down (it
      * powers the chip down; a chip left running keeps beaconing) and cancels the collectors and the inactivity
      * watchdog. The forgetting comes first, under the lock: from then on nothing is answered, served or dropped for
@@ -552,10 +567,10 @@ class RadioAccessPoint(
         captureFrame(clearFrame(parsed, plaintext))
         decryptedFrames++
         decryptedSinceAssociation++
+        // Only the first one: the kart sends about 300 a second while the video streams, which would bury every other
+        // line; stop() logs the total.
         if (decryptedSinceAssociation == 1) {
             log.i { "onDataFrame(): first data frame decrypted -> sta=$station bytes=${plaintext.size} total=$decryptedFrames" }
-        } else {
-            log.d { "onDataFrame(): data frame decrypted -> sta=$station bytes=${plaintext.size} total=$decryptedFrames" }
         }
 
         val snap = LlcSnap.unwrap(plaintext)

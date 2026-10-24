@@ -9,6 +9,7 @@ import com.mklhc.core.data.radio.AdapterState
 import com.mklhc.core.data.radio.AdapterUnavailableException
 import com.mklhc.core.data.radio.KartRadioAp
 import com.mklhc.core.data.radio.PairingNetwork
+import com.mklhc.core.data.radio.RadioRestore
 import com.mklhc.core.data.store.PairingStore
 import com.mklhc.core.domain.KartInfo
 import com.mklhc.core.domain.KartNetworkKind
@@ -156,6 +157,7 @@ import kotlin.time.TimeSource
  *   reassembler sees it (the desktop app's raw video dump); null for none. It runs on [scope], so it must
  *   return quickly; it must not keep or change the array. A failure it throws is logged (the first one per
  *   video loop) and does not reach the session.
+ * @param log where the session logs; injected by tests that check what it logs.
  */
 class KartSessionRepository(
     private val radioAp: KartRadioAp,
@@ -166,18 +168,26 @@ class KartSessionRepository(
     private val config: SessionConfig = SessionConfig(),
     private val timeSource: TimeSource = TimeSource.Monotonic,
     private val videoDatagramTap: ((ByteArray) -> Unit)? = null,
+    private val log: Logger = Logger.withTag(TAG),
 ) : KartSession {
-    private val log = Logger.withTag(TAG)
 
     // Everything the repository launches hangs off this supervisor so one failing loop never takes the
     // others down and stop() can cancel the whole subtree without touching the caller's scope.
     private val repositoryJob = SupervisorJob(scope.coroutineContext[Job])
     private val repositoryScope = CoroutineScope(scope.coroutineContext + repositoryJob)
 
+    // Where the orchestrator stands; what the UI sees is shownLinkState (see publishLinkState).
     private val _linkState = MutableStateFlow<LinkState>(LinkState.NoAdapter)
 
-    /** Where the link currently stands; the UI follows this to show progress and recovery. */
-    override val linkState: StateFlow<LinkState> = _linkState.asStateFlow()
+    private val shownLinkState = MutableStateFlow<LinkState>(LinkState.NoAdapter)
+
+    /**
+     * Where the link currently stands; the UI follows this to show progress and recovery. It is the orchestrator's own
+     * state, except while the radio is brought back up underneath the session ([KartRadioAp.radioRestore]): a session
+     * that is waiting for the kart then shows [LinkState.Recovering] with the reason (the adapter is unplugged, or the
+     * radio is starting again), since nothing is on the air yet.
+     */
+    override val linkState: StateFlow<LinkState> = shownLinkState.asStateFlow()
 
     private val _kartInfo = MutableStateFlow<KartInfo?>(null)
 
@@ -253,6 +263,11 @@ class KartSessionRepository(
      * without it a command arriving in that window would act on the job being replaced and leave the new one running.
      */
     private val commandLock = Mutex()
+
+    init {
+        // The radio coming back changes what the UI is shown, not where the orchestrator stands.
+        repositoryScope.launch { radioAp.radioRestore.collect { publishLinkState() } }
+    }
 
     /**
      * The running network stack's DHCP server, or null while no stack runs. Only this module's tests read it, to
@@ -394,6 +409,8 @@ class KartSessionRepository(
             } catch (failure: Exception) {
                 log.w { "stop(): stopping the radio failed -> message=${failure.message}" }
             }
+            // The restore observer is cancelled with the job: publish what the stopped radio leaves now.
+            publishLinkState()
             repositoryJob.cancel()
         }
     }
@@ -842,12 +859,24 @@ class KartSessionRepository(
         }
     }
 
+    /**
+     * Sends the drive command to the kart every [SessionConfig.teleopInterval] until cancelled: the latest command the UI
+     * set, shaped by the user's settings, or neutral while the link is not [LinkState.Driving] or no fresh command came
+     * for [SessionConfig.deadmanTimeout].
+     *
+     * Business logic: each change of the command on the wire is logged once, with its cause (`input`, `deadman` or
+     * `notDriving`), never each tick, so a drive can be checked afterwards from the log: when the kart was told what, and
+     * when a safety rule cut it. A cut is logged at info level, a change from the controls at debug level. A lost link
+     * usually cancels this loop with its session before the link state changes, so that cut shows as the session's own
+     * loss line and the teardown's neutral; `notDriving` covers the ticks that run in between.
+     */
     private suspend fun teleopLoop(udp: UdpEndpoint) {
         val encoder = TeleopEncoder()
         val deadmanWindow = config.deadmanTimeout
         // Wall-clock, not a tick count: mark when a fresh command last arrived and measure real elapsed time
         // each tick, so the deadman fires on time (at the window) even if the dispatcher stalls between ticks.
         var lastFresh = timeSource.markNow()
+        var lastSent: DriveCommand? = null
         while (coroutineContext.isActive) {
             if (driveCommandFresh) {
                 driveCommandFresh = false
@@ -855,14 +884,36 @@ class KartSessionRepository(
             }
             val driving = _linkState.value is LinkState.Driving
             val deadman = lastFresh.elapsedNow() >= deadmanWindow
-            val command = if (!driving || deadman) {
-                DriveCommand.NEUTRAL
-            } else {
-                applyDriveSettings(latestDriveCommand, currentSettings)
+            val cause = when {
+                !driving -> TeleopCause.NOT_DRIVING
+                deadman -> TeleopCause.DEADMAN
+                else -> TeleopCause.INPUT
+            }
+            val command = if (cause == TeleopCause.INPUT) applyDriveSettings(latestDriveCommand, currentSettings) else DriveCommand.NEUTRAL
+            if (command != lastSent) {
+                logDriveCommandChange(command, cause)
+                lastSent = command
             }
             runGuarded("teleop send") { udp.send(AddressPlan.KART_LEASE, config.kartDrivePort, encoder.encode(command)) }
             delay(config.teleopInterval)
         }
+    }
+
+    private fun logDriveCommandChange(command: DriveCommand, cause: TeleopCause) {
+        val line = "teleopLoop(): drive command changed -> throttle=${command.throttle} steering=${command.steering} " +
+            "brakeLight=${command.brakeLight} cause=${cause.label}"
+        when (cause) {
+            TeleopCause.INPUT -> log.d { line }
+            TeleopCause.DEADMAN -> log.i { "$line deadmanTimeout=${config.deadmanTimeout}" }
+            TeleopCause.NOT_DRIVING -> log.i { "$line linkState=${_linkState.value}" }
+        }
+    }
+
+    /** Why the teleop loop sends the command it sends, for its log. */
+    private enum class TeleopCause(val label: String) {
+        INPUT("input"),
+        DEADMAN("deadman"),
+        NOT_DRIVING("notDriving"),
     }
 
     /**
@@ -950,10 +1001,37 @@ class KartSessionRepository(
     private suspend fun setState(state: LinkState) {
         if (_linkState.value == state) return
         _linkState.value = state
+        publishLinkState()
         log.d { "setState(): -> state=$state" }
         // Yield so a collector on the single dispatcher observes every phase, not only the latest; the UI
         // relies on seeing each rung of the ladder.
         yield()
+    }
+
+    /**
+     * Publishes on [linkState] the orchestrator's state, or, while the radio is brought back up underneath a session
+     * that waits for the kart (beaconing or recovering), [LinkState.Recovering] with why nothing is on the air: the
+     * adapter is unplugged, or the radio is starting again. Runs on the repository's single-threaded scope, from
+     * [setState] and from the observer of [KartRadioAp.radioRestore].
+     */
+    private fun publishLinkState() {
+        val state = _linkState.value
+        val restore = radioAp.radioRestore.value
+        val waitingForTheKart = state is LinkState.Beaconing || state is LinkState.Recovering
+        val shown = when (restore) {
+            RadioRestore.NONE -> state
+            RadioRestore.WAITING_FOR_ADAPTER -> if (waitingForTheKart) LinkState.Recovering(RADIO_ADAPTER_MISSING_REASON) else state
+            RadioRestore.BRINGING_UP -> if (waitingForTheKart) LinkState.Recovering(RADIO_RESTARTING_REASON) else state
+        }
+        val previous = shownLinkState.value
+        val wasRestoring = previous == LinkState.Recovering(RADIO_ADAPTER_MISSING_REASON) ||
+            previous == LinkState.Recovering(RADIO_RESTARTING_REASON)
+        if (shown != previous && shown != state) {
+            log.i { "publishLinkState(): the radio is coming back, telling the user -> shown=$shown state=$state radioRestore=$restore" }
+        } else if (shown != previous && wasRestoring) {
+            log.i { "publishLinkState(): the radio is back, showing the session again -> state=$state" }
+        }
+        shownLinkState.value = shown
     }
 
     @OptIn(ExperimentalEncodingApi::class)
@@ -1067,6 +1145,12 @@ class KartSessionRepository(
 
         /** Why a session ends when the kart leaves the access point; shown in [LinkState.Recovering]. */
         const val STATION_LEFT_REASON = "the kart left the network"
+
+        /** Shown in [LinkState.Recovering] while the radio waits for its adapter to be plugged back in. */
+        const val RADIO_ADAPTER_MISSING_REASON = "the radio adapter is unplugged, plug it back in"
+
+        /** Shown in [LinkState.Recovering] while the radio is brought up again (the chip takes most of a minute). */
+        const val RADIO_RESTARTING_REASON = "the radio is starting again, which takes up to a minute"
 
         /** The wait before connecting again to a kart service that refused the connect (OpenKart waits 0.1 s too). */
         val CONNECT_RETRY_DELAY = 100.milliseconds

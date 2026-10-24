@@ -2,7 +2,9 @@ package com.mklhc.core.data.radio
 
 import com.mklhc.core.domain.KartNetworkKind
 import com.mklhc.core.netstack.FrameLink
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * The pairing network a pairing beacon advertises, so the access point can stand the network up exactly
@@ -55,6 +57,27 @@ enum class AdapterState {
 }
 
 /**
+ * Where a started radio stands while it is brought back up underneath a running session.
+ *
+ * Business logic: an unplugged adapter takes the radio helper down, and the radio is brought up again by itself once
+ * the adapter is back, which takes most of a minute on the real chip. Meanwhile nothing is on the air, so the session
+ * shows this instead of "beaconing": it tells the driver to plug the adapter back in, and then to wait.
+ */
+enum class RadioRestore {
+    /** The radio is up, or not started: nothing is being restored. */
+    NONE,
+
+    /** The radio is gone and no usable adapter is plugged in: it comes back once one is. */
+    WAITING_FOR_ADAPTER,
+
+    /** The radio is being brought up again on an adapter (the chip starts, then the network is served again). */
+    BRINGING_UP,
+}
+
+/** The [KartRadioAp.radioRestore] of a radio layer that is never restored underneath the session. */
+private val NEVER_RESTORED: StateFlow<RadioRestore> = MutableStateFlow(RadioRestore.NONE).asStateFlow()
+
+/**
  * The seam between the session repository and the radio + access-point layer.
  *
  * Business logic: everything below the network stack is one unit as far as the orchestrator is
@@ -87,6 +110,12 @@ interface KartRadioAp {
 
     /** True while a station is associated with the access point; emits the current value on collection. */
     val associatedStation: StateFlow<Boolean>
+
+    /**
+     * Whether the radio is being brought back up underneath the session, and why it is not on the air meanwhile;
+     * [RadioRestore.NONE] for a layer that never restores the radio by itself (the default).
+     */
+    val radioRestore: StateFlow<RadioRestore> get() = NEVER_RESTORED
 
     /**
      * Asks the platform for the user's permission to use the attached adapter. Fire-and-forget: the

@@ -349,6 +349,13 @@ once one is; so does a Start that finds the adapter gone at the last moment (the
 adapter instead of failing). While the radio is up the list stays as it was, with the adapter marked **In use**. Two
 identical adapters (the same `VID:PID`) cannot be told apart yet: `radiod` opens the first one it finds.
 
+If the adapter is unplugged while the kart is connected, the kart stops at once and the app brings the radio back by
+itself when the adapter is plugged in again, on the same network, so the kart rejoins as it does after going out of
+range. Meanwhile the status says `Link lost, reconnecting: the radio adapter is unplugged, plug it back in`, then
+`... the radio is starting again, which takes up to a minute` (the chip takes about 45 seconds to start, as on a cold
+start). Wait for it: pressing **Pair** meanwhile replaces the game network with a pairing one, and the kart then needs
+the new QR code.
+
 ### The pairing identity
 
 On its first run the app creates its identity and keeps it in `pairing.preferences_pb` in the data directory: a master
@@ -410,23 +417,44 @@ the keyboard, which works both axes at once:
 | S or Down | Reverse |
 | A or Left | Steer left |
 | D or Right | Steer right |
-| Space | Brake light, while held |
+| Space | Brake, while held: stops the kart and lights the brake light |
 
 A held key is the full value of its axis; the app caps the throttle at the max-throttle setting, half the kart's full
 throttle by default. A key pressed together with Ctrl, Alt or Cmd is a shortcut and does not drive. The on-screen
-steering slider and throttle pedal also work with the mouse, one at a time; whichever of a key and the mouse lets go
-of an axis first returns it to zero.
+steering slider, throttle pedal and brake button also work with the mouse, one at a time; whichever of a key and the
+mouse lets go of an axis first returns it to zero.
 
-Letting go means neutral: releasing a key, or the mouse button, returns that axis to zero. Every other way of losing
-the controls also stops the kart:
+Letting go means neutral: releasing a key, the mouse button or the finger returns that axis to zero at once. What the
+kart does at a zero throttle is up to its own controller, which holds the motor back, so it slows down noticeably
+rather than rolling freely; the app does not soften it. To stop, hold the brake (Space, or the on-screen button): it
+drops the throttle to zero at once, lights the brake light, and the throttle stays at zero until the brake is released
+and the throttle pressed again (a key held through the brake needs a new press). Every other way of losing the controls
+also stops the kart:
 - The window or the cockpit loses the focus (another window, a dialog): every key is released, since their key-ups go
   elsewhere. When the focus comes back, the first press of each key does nothing (it could be the auto-repeat of a key
   held all along); press it again to drive.
 - The link drops: the cockpit sends neutral and covers the controls. A key still held when it comes back does nothing
   until it is released and pressed again.
+- The cockpit is left (the back arrow), or the app goes to the background (on a phone: another app, a system dialog).
+- A touch on the pedal or the slider is taken over by the system (an edge swipe): it counts as a release.
 - The screen stops refreshing the command (its thread hangs): the session sends neutral after 250 ms without a fresh
   command.
 - The window closes: the kart is powered off (or put to sleep), as described above.
+
+Every change of what the app tells the kart is logged once, with its cause, so a drive can be checked afterwards:
+`teleopLoop(): drive command changed -> throttle=<t> steering=<s> brakeLight=<b> cause=<cause>`, where the cause is
+`input` (the controls), `deadman` (no fresh command for 250 ms) or `notDriving` (the link left the driving state). The
+throttle and the steering are the values on the wire, -128..127, after the max-throttle, expo and trim settings. A lost
+link usually ends the session first, so its cut shows as the session's loss line rather than as `notDriving`.
+
+### The log file
+
+Besides the terminal, the desktop app writes its log to a file in the data directory's `logs` folder
+(`%APPDATA%\MKLHC\logs` by default), one file per run named after its start time, `mklhc-<date>-<time>.log`; the ten
+newest are kept and older ones deleted when the app starts. The file starts once the data directory is locked, so the
+start-up lines before that are only in the terminal. Each line holds the time to the millisecond, the level, the tag and
+the message, as in the terminal. The log never holds a key or the master secret; it does hold the run's events, so keep
+it on your machine. If the file cannot be created the app says so in the terminal and runs without it.
 
 ### Dump the raw video
 

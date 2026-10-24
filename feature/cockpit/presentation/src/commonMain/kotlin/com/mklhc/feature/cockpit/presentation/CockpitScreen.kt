@@ -118,8 +118,8 @@ fun CockpitRoot(
  * The controls are stateless: the values they show come from [state], and the lambdas report what the finger does.
  * [onSteeringRelease] and [onThrottleRelease] are separate so letting go with one thumb does not touch the other
  * axis; the brake button reports its own release through [onBrake] with false. The keyboard drives through the same
- * lambdas ([keyboardDrive]: W/A/S/D or the arrows, the space bar for the brake light), which is how the desktop
- * drives both axes at once with one mouse.
+ * lambdas ([keyboardDrive]: W/A/S/D or the arrows, the space bar for the brake), which is how the desktop drives both
+ * axes at once with one mouse.
  *
  * @param state what to render.
  * @param videoAccessUnits the kart's H.264 access units, for the video surface; pass an empty flow in previews.
@@ -127,7 +127,7 @@ fun CockpitRoot(
  * @param onThrottle the throttle pedal moved to this value, -1..1.
  * @param onSteeringRelease the finger left the steering control.
  * @param onThrottleRelease the finger left the throttle pedal.
- * @param onBrake the brake-light button was pressed (true) or released (false).
+ * @param onBrake the brake button was pressed (true) or released (false).
  * @param onBack the driver asked to leave the cockpit.
  * @param modifier the modifier to apply.
  */

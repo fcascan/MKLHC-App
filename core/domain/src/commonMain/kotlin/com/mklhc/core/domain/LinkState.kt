@@ -40,7 +40,8 @@ enum class KartNetworkKind {
  *   rather than duplicated here.)
  *
  * Two states sit off the ladder: [Recovering] when an established link was lost and the orchestrator
- * is climbing back up on its own, and [Failed] when it gave up and needs the user (or a restart) to
+ * is climbing back up on its own (also shown while the radio itself is brought back up underneath the
+ * session, after an adapter replug), and [Failed] when it gave up and needs the user (or a restart) to
  * continue. Both carry a human-readable text for the UI and the logs; it is never a secret.
  */
 sealed interface LinkState {
@@ -77,9 +78,10 @@ sealed interface LinkState {
     data object Driving : LinkState
 
     /**
-     * An established link was lost and the orchestrator is recovering it automatically.
+     * An established link was lost and the orchestrator is recovering it automatically; also shown while the radio is
+     * brought back up underneath the session (an unplugged adapter), before anything is on the air again.
      *
-     * @property reason why the link was lost, for display and logs.
+     * @property reason why the link was lost, or what the radio is waiting for, for display and logs.
      */
     data class Recovering(val reason: String) : LinkState
 

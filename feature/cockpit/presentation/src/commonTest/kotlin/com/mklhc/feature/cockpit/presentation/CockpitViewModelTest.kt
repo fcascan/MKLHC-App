@@ -132,15 +132,43 @@ class CockpitViewModelTest {
     }
 
     @Test
-    fun theAxesAndTheBrakeCombineIntoOneCommand() {
+    fun theAxesCombineIntoOneCommand() {
         val session = drivingSession()
         val viewModel = CockpitViewModel(session)
 
         viewModel.onSteering(-0.4f)
         viewModel.onThrottle(0.8f)
+
+        assertEquals(driveCommandOf(0.8f, -0.4f, false), session.lastDriveCommand)
+    }
+
+    @Test
+    fun theBrakeCutsTheThrottleAtOnceAndKeepsTheSteering() {
+        val session = drivingSession()
+        val viewModel = CockpitViewModel(session)
+        viewModel.onSteering(-0.4f)
+        viewModel.onThrottle(0.8f)
+
         viewModel.onBrake(true)
 
-        assertEquals(driveCommandOf(0.8f, -0.4f, true), session.lastDriveCommand)
+        assertEquals(driveCommandOf(0f, -0.4f, true), session.lastDriveCommand)
+        assertEquals(0f, viewModel.state.value.throttleFraction, "the readout shows the throttle that is sent")
+    }
+
+    @Test
+    fun throttleInputIsIgnoredWhileBrakingAndNeedsANewPressAfterwards() {
+        val session = drivingSession()
+        val viewModel = CockpitViewModel(session)
+        viewModel.onBrake(true)
+
+        viewModel.onThrottle(1f)
+        assertEquals(driveCommandOf(0f, 0f, true), session.lastDriveCommand, "the brake overrides the throttle")
+        assertEquals(0f, viewModel.state.value.throttleFraction)
+
+        viewModel.onBrake(false)
+        assertEquals(DriveCommand.NEUTRAL, session.lastDriveCommand, "a throttle held through the brake does not come back")
+        viewModel.onThrottle(1f)
+        assertEquals(driveCommandOf(1f, 0f, false), session.lastDriveCommand)
     }
 
     @Test
@@ -204,7 +232,7 @@ class CockpitViewModelTest {
     }
 
     @Test
-    fun releasingTheThrottleKeepsTheSteering() {
+    fun releasingTheThrottleIsZeroAtOnceAndKeepsTheSteering() {
         val session = drivingSession()
         val viewModel = CockpitViewModel(session)
         viewModel.onSteering(0.6f)
@@ -212,7 +240,8 @@ class CockpitViewModelTest {
 
         viewModel.onThrottleRelease()
 
-        assertEquals(driveCommandOf(0f, 0.6f, false), session.lastDriveCommand)
+        assertEquals(driveCommandOf(0f, 0.6f, false), session.lastDriveCommand, "no ramp: the kart's own controller takes over")
+        assertEquals(0f, viewModel.state.value.throttleFraction)
     }
 
     @Test

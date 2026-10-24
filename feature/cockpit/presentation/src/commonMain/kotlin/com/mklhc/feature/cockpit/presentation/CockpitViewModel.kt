@@ -46,12 +46,16 @@ internal const val DRIVE_KEEP_ALIVE_MS = 100L
  *   repository applies the user's max-throttle and expo settings, so nothing is scaled here. While the command is
  *   not neutral it is repeated every [DRIVE_KEEP_ALIVE_MS], because the session's deadman would otherwise cut a
  *   steady throttle after a quarter of a second.
- * - Safety. Release means neutral: letting go of the steering or the throttle returns that axis to zero and
- *   resends the command (so releasing one thumb does not cut the other), and [onControlRelease] centres everything
- *   and sends [DriveCommand.NEUTRAL]. The kart is also sent neutral, with the controls centred, whenever the link
- *   is anywhere but Driving (including on the first state, if the cockpit opens before the kart is driving) and
- *   when the ViewModel is cleared, i.e. the screen was left. Control input is ignored while not driving, so a
- *   touch that slips through a disabled control cannot move the kart.
+ * - Release and brake. Release means neutral: letting go of the steering or the throttle returns that axis to zero
+ *   at once and resends the command (so releasing one thumb does not cut the other). What a zero throttle does is the
+ *   kart's own controller's business (it holds the motor back); the app sends no artificial ramp. The brake button
+ *   ([onBrake]) cuts the throttle to zero at once, lights the brake light and overrides the throttle for as long as it
+ *   is held (a throttle key held through it needs a new press afterwards; a finger on the pedal drives again with its
+ *   next move).
+ * - Safety. [onControlRelease] centres everything and sends [DriveCommand.NEUTRAL]. The kart is also sent neutral,
+ *   with the controls centred, whenever the link is anywhere but Driving (including on the first state, if the
+ *   cockpit opens before the kart is driving) and when the ViewModel is cleared, i.e. the screen was left. Control
+ *   input is ignored while not driving, so a touch that slips through a disabled control cannot move the kart.
  *
  * The raw video frames never enter the state: [videoAccessUnits] is the session's flow, handed on as is, so that
  * only the video surface touches it.
@@ -86,8 +90,12 @@ class CockpitViewModel(private val session: KartSession) : ViewModel() {
         updateControls(requireDriving = true) { it.copy(steeringFraction = value.sanitized()) }
     }
 
-    /** The driver moved the throttle pedal to [value], -1 (full reverse) .. 1 (full forward). Ignored unless driving. */
+    /**
+     * The driver moved the throttle pedal to [value], -1 (full reverse) .. 1 (full forward). Ignored unless driving,
+     * and while the brake is held (the brake overrides the throttle).
+     */
     fun onThrottle(value: Float) {
+        if (_state.value.brakeLight) return
         updateControls(requireDriving = true) { it.copy(throttleFraction = value.sanitized()) }
     }
 
@@ -111,9 +119,17 @@ class CockpitViewModel(private val session: KartSession) : ViewModel() {
         holdNeutral()
     }
 
-    /** The brake-light button went down ([active] true) or up. Pressing is ignored unless driving; releasing never is. */
+    /**
+     * The brake button went down ([active] true) or up. Down cuts the throttle to zero at once and lights the brake
+     * light; the throttle stays at zero until a new value after the release. Pressing is ignored unless driving;
+     * releasing never is.
+     */
     fun onBrake(active: Boolean) {
-        updateControls(requireDriving = active) { it.copy(brakeLight = active) }
+        if (active) {
+            updateControls(requireDriving = true) { it.copy(throttleFraction = 0f, brakeLight = true) }
+        } else {
+            updateControls(requireDriving = false) { it.copy(brakeLight = false) }
+        }
     }
 
     override fun onCleared() {

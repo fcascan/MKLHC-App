@@ -7,6 +7,7 @@ import androidx.compose.ui.window.rememberWindowState
 import co.touchlab.kermit.Logger
 import com.mklhc.app.desktop.DesktopDataDirectory
 import com.mklhc.app.desktop.DesktopKartRuntime
+import com.mklhc.app.desktop.DesktopLogFile
 import com.mklhc.app.desktop.DesktopRadioSettings
 import com.mklhc.app.di.initKoin
 import com.mklhc.core.data.radio.UsbAdapterRepository
@@ -22,6 +23,7 @@ import org.koin.dsl.module
 import java.awt.Desktop
 import java.awt.desktop.QuitStrategy
 import java.io.IOException
+import java.nio.file.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -36,7 +38,9 @@ import kotlin.system.exitProcess
  * nothing outside the process needs stopping at exit then.
  *
  * Otherwise it locks the data directory first ([DesktopDataDirectory]): when another instance holds it, the process ends
- * with a message saying so, since two instances would fight over the adapter and the pairing file. It then builds the
+ * with a message saying so, since two instances would fight over the adapter and the pairing file. Every later log line
+ * also goes to this run's file in the directory's `logs` folder ([DesktopLogFile]), so a hardware run keeps its whole
+ * log; when the file cannot be opened the app runs with the terminal only. It then builds the
  * [DesktopKartRuntime] (radiod, the radio, the pairing store, the USB adapters and the real session), binds its session
  * and its adapter repository in place of the demo's through [initKoin]'s extra module (Koin lets a later module override a definition, see [desktopSessionModule])
  * and starts it, so radiod is launched and connects while the window opens. The screens' ViewModels are resolved from
@@ -46,7 +50,7 @@ import kotlin.system.exitProcess
  * system's quit command reaches too where it can, see [closeAllWindowsOnQuit]), the JVM shutdown hook (a logout, a
  * SIGTERM, Ctrl+C in a terminal) or a start-up that throws between the runtime and the window (Koin, a display that
  * cannot be used). It stops the session (the kart is put to sleep or powered off and the radio shut down), then shuts
- * the runtime down and releases the data directory, each step bounded (see [stopForExit]).
+ * the runtime down and releases the data directory, each step bounded (see [stopForExit]), and closes the log file last.
  *
  * @param args the program arguments; `--demo` is the only one.
  */
@@ -69,18 +73,25 @@ fun main(args: Array<String>) {
             "dataDirectory=${settings.dataDirectory} videoDump=${settings.videoDumpDirectory ?: "off"}"
     }
     val dataDirectory = lockDataDirectoryOrExit(settings, log)
+    // After the lock, so two instances never write the same folder; the lines logged before it stay in the terminal only.
+    val logFile = openLogFileOrNull(dataDirectory.path.resolve(LOG_FOLDER_NAME), log)
     val runtime = DesktopKartRuntime(settings)
     val exitStop = ExitStop(log) {
-        stopForExit(
-            stopSession = { runtime.session.stop() },
-            shutdownRuntime = {
-                runtime.shutdown()
-                // Only once the runtime is down, so a new instance never takes the adapter from a radiod still exiting;
-                // when the shutdown is left running at exit, the process exit releases the lock instead.
-                dataDirectory.release()
-            },
-            log = log,
-        )
+        try {
+            stopForExit(
+                stopSession = { runtime.session.stop() },
+                shutdownRuntime = {
+                    runtime.shutdown()
+                    // Only once the runtime is down, so a new instance never takes the adapter from a radiod still exiting;
+                    // when the shutdown is left running at exit, the process exit releases the lock instead.
+                    dataDirectory.release()
+                },
+                log = log,
+            )
+        } finally {
+            // Last, so the file holds the whole stop.
+            logFile?.close()
+        }
     }
     Runtime.getRuntime().addShutdownHook(Thread({ exitStop.run(TRIGGER_SHUTDOWN_HOOK) }, SHUTDOWN_HOOK_THREAD_NAME))
     try {
@@ -136,6 +147,25 @@ private fun lockDataDirectoryOrExit(settings: DesktopRadioSettings, log: Logger)
         exitProcess(EXIT_ALREADY_RUNNING)
     }
     return locked
+}
+
+/**
+ * Opens this run's log file in [folder] (see [DesktopLogFile]) and adds it to the global logger, so every later log
+ * line also goes to the file; or runs without it, with a warning, when the file cannot be opened.
+ */
+private fun openLogFileOrNull(folder: Path, log: Logger): DesktopLogFile? {
+    val file = try {
+        DesktopLogFile.open(folder)
+    } catch (failure: IOException) {
+        log.e { "openLogFileOrNull(): the log file cannot be opened, logging to the terminal only -> folder=$folder message=${failure.message}" }
+        return null
+    } catch (failure: SecurityException) {
+        log.e { "openLogFileOrNull(): the log file cannot be opened, logging to the terminal only -> folder=$folder message=${failure.message}" }
+        return null
+    }
+    Logger.addLogWriter(file)
+    log.i { "openLogFileOrNull(): writing the log to a file -> path=${file.path} keep=${DesktopLogFile.DEFAULT_KEEP}" }
+    return file
 }
 
 /**
@@ -283,6 +313,9 @@ private fun runExitStep(what: String, timeoutMs: Long, log: Logger, step: suspen
 }
 
 private const val TAG = "Main"
+
+/** The data directory's folder that holds the log files. */
+private const val LOG_FOLDER_NAME = "logs"
 private const val RADIO_WINDOW_TITLE = "MKLHC-App"
 private const val DEMO_WINDOW_TITLE = "MKLHC-App (demo)"
 
@@ -301,8 +334,9 @@ private const val SESSION_STOP_TIMEOUT_MS = 6_000L
  */
 private const val RUNTIME_SHUTDOWN_TIMEOUT_MS = 6_000L
 
-/** How long a later exit trigger waits for a stop still running: both slices, and a margin. */
-private const val EXIT_STOP_WAIT_MS = SESSION_STOP_TIMEOUT_MS + RUNTIME_SHUTDOWN_TIMEOUT_MS + 1_000L
+/** How long a later exit trigger waits for a stop still running: both slices, the log file's close, and a margin. */
+private const val EXIT_STOP_WAIT_MS =
+    SESSION_STOP_TIMEOUT_MS + RUNTIME_SHUTDOWN_TIMEOUT_MS + DesktopLogFile.CLOSE_WAIT_MS + 1_000L
 
 /** Exit code: an environment variable or a program argument cannot be used, or the data directory cannot be created. */
 private const val EXIT_INVALID_CONFIGURATION = 2

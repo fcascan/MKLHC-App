@@ -59,6 +59,16 @@ class FakeKartRadioAp(
 
     override val associatedStation: StateFlow<Boolean> = associatedFlow.asStateFlow()
 
+    private val restoreFlow = MutableStateFlow(RadioRestore.NONE)
+
+    /** Scripted by [setRadioRestore]; [RadioRestore.NONE] unless a test plays the radio coming back. */
+    override val radioRestore: StateFlow<RadioRestore> = restoreFlow.asStateFlow()
+
+    /** Plays the radio being brought back up underneath the session (or done, with [RadioRestore.NONE]). */
+    fun setRadioRestore(value: RadioRestore) {
+        restoreFlow.value = value
+    }
+
     /** When non-null, [start] throws it (after counting the attempt) and the radio stays stopped. */
     var startFailure: Throwable? = null
 
@@ -133,6 +143,8 @@ class FakeKartRadioAp(
         beaconFlow.value = null
         servedPairing = null
         associatedFlow.value = false
+        // As the real layer: a stopped radio is not coming back.
+        restoreFlow.value = RadioRestore.NONE
     }
 
     override suspend fun beacon(network: KartNetworkKind, pairing: PairingNetwork?) {

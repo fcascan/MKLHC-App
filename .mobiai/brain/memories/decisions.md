@@ -466,7 +466,7 @@ radiod protocol 2 adds LIST_DEVICES (0x000A, u32 request id) / DEVICE_LIST (0x01
 On 2026-10-23 the app was started from Android Studio without MKLHC_RADIO and tried the default 0bda:c812 while the T3U was plugged in and healthy; nothing in the app knew which devices were present, and "no adapter" only meant "radiod not connected". The author asked to see every detected device (to tell whether the app sees the adapter at all), with the compatible ones marked, and both automatic and manual selection.
 
 ### Verified
-Unit and screen tests (domain resolver, codec round trips both ways, repository scan scheduling, bring-up resolution, desktop runtime staying NoAdapter until an adapter appears, link screen). radiod builds with protocol 2. Not yet run on hardware.
+Unit and screen tests (domain resolver, codec round trips both ways, repository scan scheduling, bring-up resolution, desktop runtime staying NoAdapter until an adapter appears, link screen). radiod builds with protocol 2. On hardware 2026-10-23 (radiod rebuilt, devourer 0bf1957): the T3U listed OPENABLE among 6 devices (the others NOT_PROBED), picked automatically, the radio came up on it with no environment variable, and the author confirmed Start worked.
 
 ### Files
 - radiod/src/UsbScan.cpp, radiod/src/Ipc.h, radiod/src/Ipc.cpp, radiod/src/main.cpp
@@ -481,4 +481,55 @@ Unit and screen tests (domain resolver, codec round trips both ways, repository 
 - app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopRadioSettings.kt
 - feature/link/presentation/src/commonMain/kotlin/com/mklhc/feature/link/presentation/AdapterSectionUi.kt
 - feature/link/presentation/src/commonMain/kotlin/com/mklhc/feature/link/presentation/LinkScreen.kt
+- docs/HARDWARE_SETUP.md
+
+## The desktop app logs every run to a file, and the teleop loop logs each change of the command it sends
+
+- id: desktop-log-file-and-teleop-change-log-20261023
+- type: decision
+- status: active
+- platform: kmp
+- area: logging
+- date: 2026-10-23
+
+### Decision
+The desktop app (radio mode) adds a `DesktopLogFile` Kermit writer once the data directory is locked: one file per run, `<data dir>/logs/mklhc-yyyyMMdd-HHmmss.log` (`-2`, `-3` on a clash), the ten newest kept (only regular files named exactly like a log file are pruned, ordered by start time then attempt). `log()` only formats and queues (bounded, 10,000 lines; a full queue drops lines and the file says how many); one daemon thread writes and flushes whenever the queue empties; the first failed write stops the file with one error line; `close()` runs last in the exit stop, bounded by 2 s in all, and `EXIT_STOP_WAIT_MS` includes it. The per-frame `onDataFrame(): data frame decrypted` debug line is gone. `KartSessionRepository.teleopLoop` logs one line per change of the command on the wire, `teleopLoop(): drive command changed -> throttle= steering= brakeLight= cause=input|deadman|notDriving` (cuts at info, input at debug); the repository's logger is a constructor parameter.
+
+### Reason
+B5 (drive on hardware) is checked from the log: every safety case must leave a line, and a run must survive the Terminal panel's 1,000-line buffer, which the per-frame line (about 300/s with video) used to overflow (B7).
+
+### Verified
+DesktopLogFileTest (naming, format, stack trace, pruning incl. the -2/-10 order and look-alikes, close, a writer that falls behind, a failing write, a stuck disk at close) and KartSessionRepositoryTest (exact teleop lines and the deadman cut at info). On hardware 2026-10-23: two runs kept whole (15,582 and 18,749 lines), every B5 step found in them.
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopLogFile.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/Main.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+- core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
+- docs/HARDWARE_SETUP.md
+
+## The brake button stops the kart, a release is plain zero; the radio comes back by itself after an adapter replug
+
+- id: brake-stops-and-radio-back-after-replug-20261023
+- type: decision
+- status: active
+- platform: kmp
+- area: cockpit
+- date: 2026-10-23
+
+### Decision
+Brake (`CockpitViewModel`): the brake button / Space cuts the throttle to zero at once, lights the brake light and overrides the throttle while held (a key held through it needs a new press). The brake is zero, not a negative throttle (a negative throttle brakes and then reverses). Releasing the throttle is zero at once; the app sends no ramp (rejected: see Reason). Radio after a replug (`RadioKartRadioAp`, B14): on a radiod reconnect the access point drops the station at once (`RadioAccessPoint.radioLost`); the re-bring-up then tries until the radio is up, pausing 2 s and waiting for the adapter repository to resolve an adapter after each failed try (no adapter, or a bring-up error); meanwhile `beacon()` keeps the request and serves it, with the same ApConfig, when the radio is back. `KartRadioAp.radioRestore` (NONE, WAITING_FOR_ADAPTER, BRINGING_UP) tells the session, which shows `Recovering("the radio adapter is unplugged, plug it back in")` or `Recovering("the radio is starting again, which takes up to a minute")` instead of Beaconing while it waits for the kart; its internal state is unchanged.
+
+### Reason
+On the kart (B5, 2026-10-23) the controller holds the motor back at a zero throttle, so a release slows the kart down instead of letting it roll. A 1.5 s software ramp on release was tried the same night and rejected by the author: it made the kart hard to drive ("se vuelve medio inmanejable"); the author wants zero at once and the kart's own behaviour, with no artificial effect. No coast command is known in the protocol. Unplugging the adapter stopped the kart at once, but the radio never came back (the re-bring-up gave up "until the next reconnect", which never comes while radiod stays connected). With that fixed, the radio came back in 53 s (6 s to see the adapter, 46 s chip init) while the screen said Beaconing, and the author pressed Pair 6 s before it was on the air, which replaced the game network.
+
+### Verified
+CockpitViewModelTest (release zero at once, the brake override and its new-press rule), RadioKartRadioApTest (no adapter: kart dropped, nothing sent, the request kept, back by itself with the same key, radioRestore WAITING_FOR_ADAPTER, BRINGING_UP, NONE; a failed bring-up tried again; a disconnect during the wait; stop ending it), KartSessionRepositoryTest (the shown Recovering reasons while restoring, the session's own state otherwise). On hardware 2026-10-23 23:28: the radio came back by itself on the same network (log `mklhc-20261023-232209.log`); the kart rejoining by itself after a replug is still to be seen.
+
+### Files
+- feature/cockpit/presentation/src/commonMain/kotlin/com/mklhc/feature/cockpit/presentation/CockpitViewModel.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/KartRadioAp.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/radio/RadioKartRadioAp.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+- core/wifi-ap/src/commonMain/kotlin/com/mklhc/core/wifi_ap/ap/RadioAccessPoint.kt
 - docs/HARDWARE_SETUP.md

@@ -17,7 +17,7 @@
     <string name="state_throttle_neutral">Neutral</string>
     <string name="state_throttle_forward">%1$d percent forward</string>
     <string name="state_throttle_reverse">%1$d percent reverse</string>
-    <string name="cd_brake_light">Brake light, hold to light</string>
+    <string name="cd_brake_light">Brake, hold to stop</string>
     <string name="state_on">On</string>
     <string name="state_off">Off</string>
 

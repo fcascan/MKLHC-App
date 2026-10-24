@@ -131,7 +131,7 @@ class CockpitScreenTest {
         onNodeWithText("60").assertExists()
         onNodeWithContentDescription("Steering").assertExists()
         onNodeWithContentDescription("Throttle").assertExists()
-        onNodeWithContentDescription("Brake light, hold to light").assertExists()
+        onNodeWithContentDescription("Brake, hold to stop").assertExists()
         onNodeWithContentDescription("Leave the cockpit").assertExists()
         onNodeWithText("Waiting for video").assertExists()
         onNodeWithText(waitingHint).assertDoesNotExist()
@@ -207,8 +207,8 @@ class CockpitScreenTest {
     fun theBrakeButtonReportsPressAndRelease() = runComposeUiTest {
         val calls = showScreen(drivingState())
 
-        onNodeWithContentDescription("Brake light, hold to light").performTouchInput { down(center) }
-        onNodeWithContentDescription("Brake light, hold to light").performTouchInput { up() }
+        onNodeWithContentDescription("Brake, hold to stop").performTouchInput { down(center) }
+        onNodeWithContentDescription("Brake, hold to stop").performTouchInput { up() }
 
         assertEquals(listOf(true, false), calls.brake)
     }
@@ -219,7 +219,7 @@ class CockpitScreenTest {
 
         onNodeWithContentDescription("Steering").performTouchInput { down(Offset(width * 0.95f, centerY)); up() }
         onNodeWithContentDescription("Throttle").performTouchInput { down(Offset(centerX, height * 0.02f)); up() }
-        onNodeWithContentDescription("Brake light, hold to light").performTouchInput { down(center); up() }
+        onNodeWithContentDescription("Brake, hold to stop").performTouchInput { down(center); up() }
 
         assertTrue(calls.steering.isEmpty())
         assertTrue(calls.throttle.isEmpty())

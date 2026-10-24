@@ -105,7 +105,7 @@ class DesignSystemSmokeTest {
         }
 
         onNodeWithContentDescription("Steering").assertExists()
-        onNodeWithContentDescription("Brake light, hold to light").assertExists()
+        onNodeWithContentDescription("Brake, hold to stop").assertExists()
         val image = onRoot().captureToImage()
         assertTrue(image.width > 0 && image.height > 0)
     }

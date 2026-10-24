@@ -1,11 +1,16 @@
 package com.mklhc.core.data.session
 
+import co.touchlab.kermit.Logger
+import co.touchlab.kermit.Severity
 import com.mklhc.core.crypto.CryptoPrimitives
+import com.mklhc.core.data.CapturingLogWriter
+import com.mklhc.core.data.capturingLogger
 import com.mklhc.core.data.identity.deriveKartIdentity
 import com.mklhc.core.data.radio.AdapterState
 import com.mklhc.core.data.radio.AdapterUnavailableException
 import com.mklhc.core.data.radio.FakeKartRadioAp
 import com.mklhc.core.data.radio.KartRadioAp
+import com.mklhc.core.data.radio.RadioRestore
 import com.mklhc.core.data.store.InMemoryPairingStore
 import com.mklhc.core.data.store.PairingStore
 import com.mklhc.core.domain.AdapterResolution
@@ -86,6 +91,7 @@ class KartSessionRepositoryTest {
         radioSeenByRepo: (FakeKartRadioAp) -> KartRadioAp = { it },
         kartServicesLateBy: Duration? = null,
         videoDatagramTap: ((ByteArray) -> Unit)? = null,
+        log: Logger = Logger.withTag("KartSessionRepository"),
     ): Harness {
         val radio = FakeKartRadioAp()
         val store = store(settings)
@@ -99,6 +105,7 @@ class KartSessionRepositoryTest {
             clock = fixedClock,
             timeSource = testScheduler.timeSource,
             videoDatagramTap = videoDatagramTap,
+            log = log,
         )
         val kart = FakeKart(radio, masterSecret(), scope, crypto, servicesLateBy = kartServicesLateBy)
         kart.start()
@@ -283,6 +290,40 @@ class KartSessionRepositoryTest {
         refresher.cancel()
         delay(400)
         assertEquals(0, h.kart.teleopPackets.last()[0].toInt(), "the deadman sent neutral throttle")
+    }
+
+    @Test
+    fun teleopLogsEachChangeOfTheSentCommandAndWhenTheDeadmanCutsIt() = runTest {
+        val logs = CapturingLogWriter()
+        val h = harness(
+            settings = KartSettings(maxThrottlePercent = 50, steeringExpoPercent = 0, steeringTrimPercent = 0),
+            log = capturingLogger(logs, "KartSessionRepository"),
+        )
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        val refresher = backgroundScope.launch {
+            while (true) {
+                h.repo.setDriveCommand(DriveCommand(throttle = 120, steering = -40, brakeLight = true))
+                delay(20)
+            }
+        }
+        delay(500)
+        refresher.cancel()
+        delay(400)
+
+        val teleopLines = logs.entries.filter { it.message.startsWith("teleopLoop(): ") }
+        assertEquals(
+            listOf(
+                "teleopLoop(): drive command changed -> throttle=0 steering=0 brakeLight=false cause=input",
+                "teleopLoop(): drive command changed -> throttle=60 steering=-40 brakeLight=true cause=input",
+                "teleopLoop(): drive command changed -> throttle=0 steering=0 brakeLight=false cause=deadman deadmanTimeout=250ms",
+            ),
+            teleopLines.map { it.message },
+            "one line per change of the sent command, none per tick",
+        )
+        assertEquals(Severity.Info, teleopLines.last().severity, "the deadman cutting a held command is a safety event")
     }
 
     // ---- telemetry and video surfacing --------------------------------------------------------
@@ -544,6 +585,32 @@ class KartSessionRepositoryTest {
         withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Recovering(STATION_LEFT) } }
 
         // A kart that comes back and connects gets a working session.
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+    }
+
+    @Test
+    fun whileTheRadioComesBackTheLinkSaysWhyInsteadOfBeaconing() = runTest {
+        val h = harness()
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        // The adapter is unplugged: radiod comes back with no radio and the kart is dropped.
+        h.radio.setRadioRestore(RadioRestore.WAITING_FOR_ADAPTER)
+        assertEquals(LinkState.Driving, h.repo.linkState.value, "a driving session is shown as it is")
+        h.kart.leave()
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Recovering(ADAPTER_MISSING) } }
+        delay(1_000)
+        assertEquals(LinkState.Recovering(ADAPTER_MISSING), h.repo.linkState.value, "not Beaconing: nothing is on air")
+
+        // Plugged in again: the chip is being brought up, which takes most of a minute on the real adapter.
+        h.radio.setRadioRestore(RadioRestore.BRINGING_UP)
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Recovering(RADIO_RESTARTING) } }
+
+        // On the air again: the session's own state shows, and the kart rejoins as after leaving range.
+        h.radio.setRadioRestore(RadioRestore.NONE)
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Beaconing(KartNetworkKind.GAME) } }
         h.kart.runGameSession()
         awaitDriving(h.repo)
     }
@@ -1104,6 +1171,10 @@ private class CountingPairingStore(private val inner: InMemoryPairingStore) : Pa
 
 /** The reason [LinkState.Recovering] carries when the kart left the network. */
 private const val STATION_LEFT = "the kart left the network"
+
+/** The reasons shown while the radio comes back under the session: the adapter is missing, the chip is starting. */
+private const val ADAPTER_MISSING = "the radio adapter is unplugged, plug it back in"
+private const val RADIO_RESTARTING = "the radio is starting again, which takes up to a minute"
 
 /** How late [LateDepartureRadio] lets the repository's watchers see a departure; shorter than the kart's connect retries. */
 private val DEPARTURE_LAG = 500.milliseconds

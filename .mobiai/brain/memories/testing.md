@@ -192,3 +192,64 @@ FFmpeg 8.1.2 (`org.bytedeco:ffmpeg:8.1.2-1.5.14`, LGPL build, through a throwawa
 
 ### Live re-run with the fixed reassembler (2026-10-21, commit aea2196)
 Game session on the paired kart (Start, not Pair), `MKLHC_VIDEO_DUMP=spike-captures\video`, 90 s: 25,151 datagrams, 2,700 frames (90 keyframes), same stream format. In the surviving log, no datagram dropped and no frame abandoned by the reassembler (before B1: orphan continuations and surplus on every frame); the "surplus trimmed" lines left are the last datagram's padding, one per frame. The dump fits the model: 2,699 frames with exactly one frame-end datagram, every frame ending on a non-zero octet; one datagram was lost over the radio (one sequence step of 2), which merged two frames, the case the sequence check drops. Clean stop again (kart power-off, beacon off by three WLAN scans). Not decoded live yet: that is B4.
+
+## Hardware run: B5, the kart driven from the desktop app (keyboard and mouse), every safety cut in the log
+
+- id: hardware-run-b5-drive-from-the-desktop-app-20261023
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: cockpit
+- date: 2026-10-23
+
+### Result (hardware, 2026-10-23 21:50-21:54, Archer T3U picked on the link screen, devourer 0bf1957, log file `mklhc-20261023-215042.log`)
+The author ran the checklist `.ia-docs/plans/2026-10-23-b5-drive-checklist.md`, part A (wheels off the ground) and part B (on the floor), and reported every step as planned. This run went through Pair (the kart rejoined the game network and Driving was reached 54 s after the click, 46 s of it the radio bring-up: BB/AGC tables 31 s, RF tables 12 s, as on 2026-10-20). The log file kept the whole run (15,582 lines). From its 337 `teleopLoop(): drive command changed` lines, all `cause=input`:
+- Full keyboard axes on the wire at the default 50 % max throttle: throttle 63 / -64, steering 127 / -127 (the cockpit maps -1 to -127, not -128); W+D gave 63 / 127; the brake light toggled 5 times.
+- The mouse pedal produced the partial values (2..28).
+- Focus loss (S1) three times while W or S was held: the next sent command was neutral 15-44 ms after `window lost the focus, releasing the held keys`.
+- Closing the window: `shutdown(): requesting kart power-off`, the radio and radiod down, beacon off by three WLAN scans.
+- No deadman cut and no link loss in this run: the adapter unplug (S5) and the full-forward-to-reverse switch (B3, for F6) do not show in this log.
+
+### Second run (2026-10-23 22:25-22:35, log `mklhc-20261023-222557.log`): S5, B3 and two kart power cycles
+- B3: about 18 switches from full forward (63) straight to full reverse (-64) within 0.3-1.5 s, and mouse sweeps through
+  zero. The app sends exactly what is asked; how the kart answered (brake first or reverse at once) is the author's
+  observation, recorded with F6.
+- S5, adapter unplugged at 22:27:45.998 while W was held: libusb `ReadPipe/WritePipe failed`, radiod `code=40 RX loop
+  ended unexpectedly`, exit code 3, relaunched 0.5 s later; the kart closed its RCD control channel 6.6 s after the
+  unplug (22:27:52.6) and the session went to Recovering, cockpit at neutral. **Replug not recovered:** radiod's
+  relaunch found no adapter (`SELECTED_DEVICE_ABSENT`, "left for the next reconnect"); the adapter was back and
+  OPENABLE at 22:28:00, but nothing brought the radio up again, since radiod stayed connected and only a radiod
+  reconnect retries. radiod refused the 30 Hz teleop datagrams (`TX_FRAME before INIT`, 163 error pairs in the 6 s
+  until the session was lost) and then the recovery's beacon (`UPDATE_BEACON without a running beacon`); the session
+  then sat in `Beaconing(GAME)` with no radio for 2 min 17 s, until the author got out with Pair, cancel and Pair again
+  (a fresh bring-up, 46 s). Backlog B14, fixed the same night (the re-bring-up waits for the adapter and comes back by
+  itself; not yet re-run on hardware).
+- Brake and release, as the author felt them: full forward to full reverse brakes first, then turns the wheels the
+  other way; releasing W or S also brakes instead of rolling, which the author found wrong (that is the brake button's
+  job). The adapter unplug stopped the kart at once. Answer (same night): the brake button drops the throttle to zero
+  at once (F6). A 1.5 s release ramp was tried and rejected: too noticeable, hard to drive; a release is plain zero.
+
+### Third run (2026-10-23 23:22-23:29, log `mklhc-20261023-232209.log`, 29,492 lines): the replug with the B14 fix
+- The brake felt right. The release ramp did not (removed afterwards).
+- Unplug at 23:27:57.9 while driving: radiod exit 3, relaunched; at 23:27:58.5 `radioLost()` dropped the kart, the
+  session went Recovering then (shown) Beaconing(GAME), `no usable adapter, waiting for one`. Plugged back: the
+  repository saw it at 23:28:04.6 (attempt 2), the chip init took until 23:28:51.4 (46 s), and the game network was
+  served again with the same SSID and keys. The author, seeing "Beaconing" with the kart's LED blinking, had pressed
+  Pair at 23:28:45, so 5 ms later the pairing network replaced it and the kart needed the new QR. Answer: while the
+  radio comes back the link now shows Recovering with "plug it back in" / "the radio is starting again, which takes up
+  to a minute". The kart rejoining by itself after a replug is still to be seen on hardware.
+- Kart power cycles: the kart left at 22:33:37 and was Driving again at 22:33:53 (16 s, by itself); at 22:34:18 the
+  RCD channel closed and the kart left at 22:34:23, Driving again at 22:34:28. The recovery from a kart power cycle works.
+- Close: power-off requested, beacon off by three WLAN scans (BSSID 16:0b:b4:ec:82:0c).
+
+### Two identities on this PC: the Claude desktop app's file virtualization
+Programs started from the Claude desktop app (its Terminal panel, the agent's shell) run inside its MSIX package, so
+Windows redirects their writes under `%APPDATA%` to `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\`.
+There the pairing file holds identity A (BSSID 32:8d:c9:b5:ef:3b, channel 6); the real `%APPDATA%\MKLHC`, used by
+Android Studio and any normal terminal, holds identity B (BSSID 16:0b:b4:ec:82:0c, channel 11). The kart is paired with
+B since 2026-10-23 21:51. A run started from the Claude Terminal panel therefore needs Pair, which moves the kart to A.
+Run the app from Android Studio or a normal terminal; inside the package, reads of `%APPDATA%\MKLHC` show the merged view
+(the copy wins), which is why the agent's shell saw A.
+
+### Noise still in the log (per datagram, about 30/s each)
+`TelemetryDecoder decode(): type 3 telemetry is not specified yet` (4,735 lines), `LspVideoReassembler append(): surplus octets trimmed` (the last datagram's padding, 4,613), and `CCMP rejected a frame ... retry=true reason=PN replay detected` at warn (1,632, 3 % of the 54,327 decrypted frames: the kart retransmitting frames already received; one with retry=false).

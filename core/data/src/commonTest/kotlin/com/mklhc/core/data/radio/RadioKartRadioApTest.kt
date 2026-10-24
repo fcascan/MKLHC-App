@@ -766,7 +766,7 @@ class RadioKartRadioApTest {
     }
 
     @Test
-    fun aFailingReBringUpIsLoggedAndTheNextReconnectServesTheInterruptedNetwork() = runTest {
+    fun aFailingReBringUpIsLoggedAndTriedAgainByItselfWithTheInterruptedNetwork() = runTest {
         val connection = MutableStateFlow(true)
         val rig = Rig(this, radioConnection = connection)
         rig.start()
@@ -774,26 +774,30 @@ class RadioKartRadioApTest {
         val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
         rig.radio.clearSentMessages()
 
+        // An adapter just plugged back in can fail its first bring-up (WinUSB not bound yet): radiod stays connected.
         rig.relaunchRadiod(connection)
         rig.radio.emitEvent(RadioMessage.Error(code = 7u, text = "cannot open the adapter"))
         runCurrent()
 
         assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName }, "nothing is served on a radio that did not come up")
-        val failure = rig.logs.entries.single { it.severity == Severity.Error && "left for the next reconnect" in it.message }
-        assertTrue("redoBringUpAfterReconnect(): " in failure.message && "-> message=" in failure.message, failure.message)
+        val failure = rig.logs.entries.single { it.severity == Severity.Error && "the radio did not come up again" in it.message }
+        assertTrue("redoBringUpOnce(): " in failure.message && "attempt=1" in failure.message, failure.message)
         assertTrue("cannot open the adapter" in failure.message, failure.message)
+        assertEquals(listOf(ADAPTER, null), rig.adapters.activeReports, "the radio is down, so the scans resume")
 
-        // The radio is off the air, and a request says so instead of being taken for a no-op.
-        assertFailsWith<IllegalStateException> { rig.ap.beacon(KartNetworkKind.GAME) }
+        // Meanwhile a request is kept for later, not sent to a radiod with no radio and not taken for a no-op.
+        rig.ap.beacon(KartNetworkKind.GAME)
         assertEquals(2, rig.radio.sentMessages.size)
 
-        // The next reconnect works, and serves what the radio served before it was lost.
-        rig.relaunchRadiod(connection)
+        // After the pause the re-bring-up tries again by itself, with no reconnect, and serves the same network.
+        advanceTimeBy(ADAPTER_WAIT_MS)
+        runCurrent()
         rig.radiodReady()
         assertEquals(
             listOf("OpenDevice", "Init", "OpenDevice", "Init", "SetIdentity", "StartBeacon"),
             rig.radio.sentMessages.map { it::class.simpleName },
         )
+        assertEquals(listOf(ADAPTER, null, ADAPTER), rig.adapters.activeReports)
         assertContentEquals(firstStart.beacon, rig.radio.sentOfType<RadioMessage.StartBeacon>().single().beacon)
         val kart = rig.station(rig.gameKey())
         rig.associate(kart, rig.identity.gameSsid)
@@ -824,7 +828,7 @@ class RadioKartRadioApTest {
         rig.radio.clearSentMessages()
         rig.relaunchRadiod(connection)
         assertTrue(rig.radio.sentMessages.isEmpty(), "the watcher ended with stop")
-        assertFalse(rig.logs.allText().contains("left for the next reconnect"), "a stop is not a failed bring-up")
+        assertFalse(rig.logs.allText().contains("did not come up again"), "a stop is not a failed bring-up")
     }
 
     @Test
@@ -843,7 +847,7 @@ class RadioKartRadioApTest {
         runCurrent()
 
         assertTrue(request.isCompleted, "the abandoned bring-up no longer holds the lifecycle lock (a request is answered at once)")
-        assertFalse(rig.logs.allText().contains("left for the next reconnect"), "an abandoned bring-up is not a failure")
+        assertFalse(rig.logs.allText().contains("did not come up again"), "an abandoned bring-up is not a failure")
 
         connection.value = true
         runCurrent()
@@ -930,8 +934,10 @@ class RadioKartRadioApTest {
         // The first adapter was unplugged while radiod was away, and the other one is there.
         rig.adapters.setDevices(listOf(DetectedUsbDevice(OTHER_ADAPTER, bus = 2, address = 3, access = UsbDeviceAccess.OPENABLE)))
 
+        assertEquals(RadioRestore.NONE, rig.ap.radioRestore.value, "a radio that is up is not coming back")
         rig.relaunchRadiod(connection)
 
+        assertEquals(RadioRestore.BRINGING_UP, rig.ap.radioRestore.value, "radiod is back with nothing brought up: the radio restarts")
         assertEquals(RadioMessage.OpenDevice(OTHER_ADAPTER.vid, OTHER_ADAPTER.pid), rig.radio.sentMessages.first())
         assertEquals(2, rig.adapters.resolveCount)
         rig.radiodReady()
@@ -940,7 +946,81 @@ class RadioKartRadioApTest {
     }
 
     @Test
-    fun aReBringUpWithNoUsableAdapterIsLoggedAndTheNextReconnectTriesAgain() = runTest {
+    fun aReBringUpWithNoUsableAdapterWaitsForItAndServesTheSameNetworkWhenItIsBack() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
+        val kart = rig.station(rig.gameKey())
+        rig.associate(kart, rig.identity.gameSsid)
+        rig.radio.clearSentMessages()
+        rig.adapters.setDevices(emptyList()) // unplugged: radiod died with it and comes back with no adapter
+
+        rig.relaunchRadiod(connection)
+
+        assertTrue(rig.radio.sentMessages.isEmpty(), "nothing is opened without an adapter")
+        assertFalse(rig.ap.associatedStation.value, "the kart is dropped at once: the radio it was associated on is gone")
+        assertEquals(RadioRestore.WAITING_FOR_ADAPTER, rig.ap.radioRestore.value, "the session can tell the user why")
+        val waiting = rig.logs.entries.single { "no usable adapter, waiting for one" in it.message }
+        assertEquals(Severity.Warn, waiting.severity)
+        assertTrue("reason=NO_COMPATIBLE_DEVICE" in waiting.message, waiting.message)
+        assertFalse(rig.logs.allText().contains("did not come up again"), "a missing adapter is waited for, not a failure")
+        assertEquals(listOf(ADAPTER, null), rig.adapters.activeReports, "the radio is down, so the scans resume")
+
+        // Meanwhile nothing reaches radiod: no frame for the dropped kart, and the orchestrator's beacon request is kept.
+        rig.ap.frameLink.send(EtherType.IPV4, ByteArray(20))
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "no TX_FRAME and no UPDATE_BEACON while the radio is down: ${rig.radio.sentMessages}")
+        assertTrue(rig.logs.allText().contains("the network is served when it is back -> network=GAME"), rig.logs.allText())
+
+        // Plugged in again: the repository sees it, and the radio comes back by itself with the very same network.
+        advanceTimeBy(ADAPTER_WAIT_MS)
+        runCurrent()
+        assertTrue(rig.radio.sentMessages.isEmpty(), "still nothing while the adapter is missing")
+        rig.adapters.setDevices(listOf(DetectedUsbDevice(ADAPTER, bus = 1, address = 4, access = UsbDeviceAccess.OPENABLE)))
+        advanceTimeBy(ADAPTER_WAIT_MS)
+        runCurrent()
+        assertEquals(listOf("OpenDevice", "Init"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertEquals(RadioRestore.BRINGING_UP, rig.ap.radioRestore.value, "the chip is starting")
+        rig.radiodReady()
+        assertEquals(RadioRestore.NONE, rig.ap.radioRestore.value)
+        assertEquals(listOf("OpenDevice", "Init", "SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName })
+        assertContentEquals(firstStart.beacon, rig.radio.sentOfType<RadioMessage.StartBeacon>().single().beacon)
+        assertEquals(listOf(ADAPTER, null, ADAPTER), rig.adapters.activeReports)
+        assertTrue(rig.logs.allText().contains("redoBringUpOnce(): radio up again"), rig.logs.allText())
+
+        // The kart rejoins with the key it holds, and the network counts as served.
+        rig.associate(kart, rig.identity.gameSsid)
+        assertTrue(rig.discoverGetsThrough(kart, pn = 1), "the kart's key is still the one of the first game network")
+        rig.radio.clearSentMessages()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertTrue(rig.radio.sentMessages.isEmpty())
+    }
+
+    @Test
+    fun aNetworkAskedForWhileWaitingForTheAdapterIsTheOneServedWhenItIsBack() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        rig.radio.clearSentMessages()
+        rig.adapters.setDevices(emptyList())
+        rig.relaunchRadiod(connection)
+
+        rig.ap.beacon(KartNetworkKind.PAIRING, pairingNetwork())
+        rig.adapters.setDevices(listOf(DetectedUsbDevice(ADAPTER, bus = 1, address = 4, access = UsbDeviceAccess.OPENABLE)))
+        advanceTimeBy(ADAPTER_WAIT_MS)
+        runCurrent()
+        rig.radiodReady()
+
+        assertTrue(rig.logs.allText().contains("serve(): beacon started -> ssid=$PAIRING_SSID"), rig.logs.allText())
+        rig.associate(rig.station(rig.pairingKey()), PAIRING_SSID)
+        assertTrue(rig.discoverGetsThrough(rig.station(rig.pairingKey()), pn = 1), "the pairing network, with its key, is the one on air")
+    }
+
+    @Test
+    fun aDisconnectDuringTheWaitForTheAdapterLeavesTheNextReconnectToBringItBack() = runTest {
         val connection = MutableStateFlow(true)
         val rig = Rig(this, radioConnection = connection)
         rig.start()
@@ -948,20 +1028,40 @@ class RadioKartRadioApTest {
         val firstStart = rig.radio.sentOfType<RadioMessage.StartBeacon>().single()
         rig.radio.clearSentMessages()
         rig.adapters.setDevices(emptyList())
-
         rig.relaunchRadiod(connection)
 
-        assertTrue(rig.radio.sentMessages.isEmpty(), "nothing is opened without an adapter")
-        val failure = rig.logs.entries.single { it.severity == Severity.Error && "left for the next reconnect" in it.message }
-        assertTrue("NO_COMPATIBLE_DEVICE" in failure.message, failure.message)
-        assertEquals(listOf(ADAPTER, null), rig.adapters.activeReports, "the radio is down, so the scans resume")
+        connection.value = false // radiod goes away again while the re-bring-up waits
+        runCurrent()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        assertTrue(rig.radio.sentMessages.isEmpty(), "a request is still kept for when the radio is back")
 
         rig.adapters.setDevices(listOf(DetectedUsbDevice(ADAPTER, bus = 1, address = 4, access = UsbDeviceAccess.OPENABLE)))
-        rig.relaunchRadiod(connection)
+        connection.value = true
+        runCurrent()
         rig.radiodReady()
+
         assertEquals(listOf("OpenDevice", "Init", "SetIdentity", "StartBeacon"), rig.radio.sentMessages.map { it::class.simpleName })
         assertContentEquals(firstStart.beacon, rig.radio.sentOfType<RadioMessage.StartBeacon>().single().beacon)
-        assertEquals(listOf(ADAPTER, null, ADAPTER), rig.adapters.activeReports)
+    }
+
+    @Test
+    fun stopEndsTheWaitForTheAdapter() = runTest {
+        val connection = MutableStateFlow(true)
+        val rig = Rig(this, radioConnection = connection)
+        rig.start()
+        rig.ap.beacon(KartNetworkKind.GAME)
+        rig.adapters.setDevices(emptyList())
+        rig.relaunchRadiod(connection)
+
+        rig.ap.stop()
+        rig.radio.clearSentMessages()
+        rig.adapters.setDevices(listOf(DetectedUsbDevice(ADAPTER, bus = 1, address = 4, access = UsbDeviceAccess.OPENABLE)))
+        advanceTimeBy(ADAPTER_WAIT_MS)
+        runCurrent()
+
+        assertTrue(rig.radio.sentMessages.isEmpty(), "a stopped radio is not brought up when the adapter comes back")
+        assertEquals(RadioRestore.NONE, rig.ap.radioRestore.value, "a stopped radio is not coming back")
+        assertFailsWith<IllegalStateException> { rig.ap.beacon(KartNetworkKind.GAME) }
     }
 
     // ---- platform seams ------------------------------------------------------------------------
@@ -1233,6 +1333,9 @@ class RadioKartRadioApTest {
 
         // The desktop supervisor's shortest wait before it relaunches radiod.
         val SUPERVISOR_RESTART_BACKOFF = 500.milliseconds
+
+        // A little more than the pause between two tries for an adapter that is back (RadioKartRadioAp, 2 s).
+        const val ADAPTER_WAIT_MS = 2_500L
 
         const val NONCE_COUNT = 0x10000
         const val NONCE_BYTES = 16
