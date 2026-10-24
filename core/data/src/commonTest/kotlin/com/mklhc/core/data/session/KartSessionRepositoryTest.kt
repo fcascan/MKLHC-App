@@ -19,6 +19,7 @@ import com.mklhc.core.domain.KartSettings
 import com.mklhc.core.domain.LinkState
 import com.mklhc.core.domain.PairedKart
 import com.mklhc.core.domain.UnavailableReason
+import com.mklhc.core.kart_protocol.fuji.FujiPorts
 import com.mklhc.core.kart_protocol.teleop.DriveCommand
 import com.mklhc.core.kart_protocol.telemetry.Telemetry
 import com.mklhc.core.kart_protocol.video.LspVideo
@@ -949,6 +950,26 @@ class KartSessionRepositoryTest {
             h.repo.linkState.value !is LinkState.Beaconing,
             "the link is not left beaconing after cancel; it is ${h.repo.linkState.value}",
         )
+    }
+
+    @Test
+    fun aFatalPairingErrorTakesThePairingNetworkOffTheAir() = runTest {
+        // The kart's pairing service never listens, so the connect window runs out: a fatal pairing error.
+        val h = harness(kartServicesLateBy = 1_000.seconds)
+        h.repo.startPairing()
+        withTimeout(5_000) { h.repo.pairingQr.first { it != null } }
+        backgroundScope.launch { h.kart.runPairingThenGame() }
+
+        val failed = withTimeout(10_000) { h.repo.linkState.first { it is LinkState.Failed } } as LinkState.Failed
+
+        assertTrue("refused the connection to port ${FujiPorts.PAIRING}" in failed.error, "the failure names the refusal: ${failed.error}")
+        assertFalse(h.radio.isStarted, "the radio is stopped by the time the failure is published")
+        assertNull(h.radio.currentBeacon, "the pairing network is not left on the air")
+        assertNull(h.repo.pairingQr.value, "no QR is shown")
+
+        h.repo.start()
+        withTimeout(5_000) { h.repo.linkState.first { it == LinkState.Beaconing(KartNetworkKind.GAME) } }
+        assertTrue(h.radio.isStarted, "a start after the failure brings the radio up again")
     }
 
     // ---- lifecycle commands run one at a time, in call order -----------------------------------

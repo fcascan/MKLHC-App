@@ -567,3 +567,18 @@ Status: in place; the hook was tested by hand on a scratch repository, not yet s
 - CLAUDE.md
 - .claude/settings.json
 - .claude/hooks/graph-freshness-check.sh
+
+## Variable local port for the kart connects: wait for the stale-connection case to recur
+
+- id: variable-local-port-for-the-kart-connects-wait-for-the-stale-20261024-050509
+- type: architecture_decision
+- status: active
+- platform: kmp
+- area: netstack
+- date: 2026-10-24
+
+Decision (author, 2026-10-24): keep the fixed local ports (41003 control, 41007 event) and rely on the SYN_SENT RST fix (bugfix syn-sent-drops-a-challenge-ack-so-a-kart-holding-a-stale-con-20261024-044659) for now. Do not add a per-attempt local port yet. Reason: three out-of-range drops recovered on hardware, but none reproduced the stale-connection case, so there is no evidence yet on whether the RST fix is enough. When a hardware log shows the case again (the kart rejoins and handshakes but the 5103 connect hangs, or 'onSegmentSynSent(): unacceptable ACK while connecting' appears), use that log to decide: if the RST is followed by 'connection established -> localPort=41003' the fix is enough and the per-attempt port is not needed; if the connect still times out, add the per-attempt local port (OpenKart retries from ephemeral ports).
+
+### Files
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/SessionConfig.kt
+- core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt

@@ -5,6 +5,7 @@ import java.io.IOException
 import java.nio.channels.FileChannel
 import java.nio.channels.FileLock
 import java.nio.channels.OverlappingFileLockException
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -125,16 +126,23 @@ class DesktopDataDirectory private constructor(
  *
  * @param directory the data directory.
  * @param log where a problem is logged.
+ * @param firstLook the first check of whether [directory] exists; tests inject one that misses an existing directory.
  * @throws IOException when the directory cannot be created at all.
  */
-internal fun createOwnerOnlyDirectory(directory: Path, log: Logger) {
+internal fun createOwnerOnlyDirectory(directory: Path, log: Logger, firstLook: (Path) -> Boolean = { Files.isDirectory(it) }) {
     val posix = POSIX_ATTRIBUTE_VIEW in directory.fileSystem.supportedFileAttributeViews()
-    if (Files.isDirectory(directory)) {
+    if (firstLook(directory)) {
         if (posix) warnWhenOthersCanReach(directory, log)
         return
     }
     if (!posix) {
-        Files.createDirectories(directory)
+        directory.parent?.let { Files.createDirectories(it) }
+        try {
+            Files.createDirectory(directory)
+        } catch (alreadyThere: FileAlreadyExistsException) {
+            acceptExistingDirectoryOrRethrow(directory, alreadyThere, log)
+            return
+        }
         log.i { "createOwnerOnlyDirectory(): data directory created -> path=$directory" }
         return
     }
@@ -143,6 +151,10 @@ internal fun createOwnerOnlyDirectory(directory: Path, log: Logger) {
         // The umask can only clear bits, so the result is never wider than owner-only.
         Files.createDirectory(directory, PosixFilePermissions.asFileAttribute(OWNER_ONLY))
         null
+    } catch (alreadyThere: FileAlreadyExistsException) {
+        acceptExistingDirectoryOrRethrow(directory, alreadyThere, log)
+        warnWhenOthersCanReach(directory, log)
+        return
     } catch (failure: IOException) {
         failure
     } catch (failure: UnsupportedOperationException) {
@@ -154,6 +166,21 @@ internal fun createOwnerOnlyDirectory(directory: Path, log: Logger) {
     }
     log.w { "createOwnerOnlyDirectory(): the data directory could not be created owner-only, creating it as is -> path=$directory message=${failure.message}" }
     Files.createDirectories(directory)
+}
+
+/**
+ * Accepts a [directory] that turned out to exist when it was about to be created, logging that nothing was created.
+ *
+ * Business logic: the first check can miss an existing directory (on Windows `Files.isDirectory` was seen to answer
+ * false for one, probably while the antivirus held it), and the log must not then claim a creation: a "created" line
+ * means the pairing identity is new, and a false one would hide a real loss of it. A file, not a directory, at that
+ * path is still an error, as `Files.createDirectories` treats it.
+ *
+ * @throws FileAlreadyExistsException [alreadyThere] again when what exists at [directory] is not a directory.
+ */
+private fun acceptExistingDirectoryOrRethrow(directory: Path, alreadyThere: FileAlreadyExistsException, log: Logger) {
+    if (!Files.isDirectory(directory)) throw alreadyThere
+    log.w { "acceptExistingDirectoryOrRethrow(): the data directory was already there although the first check missed it, nothing created -> path=$directory" }
 }
 
 /** Logs a warning when the group or others have any access to [directory]; best effort. */

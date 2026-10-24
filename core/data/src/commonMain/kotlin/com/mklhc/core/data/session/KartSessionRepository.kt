@@ -128,7 +128,10 @@ import kotlin.time.TimeSource
  * While pairing, any session loss before the SetGroupInfo call starts (a departure, the RCD control channel closing,
  * or the stale RCD connection reset by the kart's reconnect) ends only that attempt: it is torn down and the app
  * waits for the kart again on the same pairing network, with the same QR. Any other failure ends the pairing, and
- * [cancelPairing] / [stop] are the way out of a kart that keeps failing. Once the SetGroupInfo call is under way,
+ * [cancelPairing] / [stop] are the way out of a kart that keeps failing.
+ *
+ * Failure: an error that ends the orchestrator (the link settles on [LinkState.Failed]) stops the network stack and the
+ * radio before the state is published, so the network it was beaconing does not stay on the air with nothing serving it. Once the SetGroupInfo call is under way,
  * the kart leaving is its expected reset onto the game network, not a loss.
  *
  * Safety is woven through: a deadman repeats the last drive command for at most [SessionConfig.deadmanTimeout]
@@ -485,9 +488,30 @@ class KartSessionRepository(
             throw cancelled
         } catch (fatal: Exception) {
             log.e(fatal) { "orchestrate(): fatal error -> message=${fatal.message}" }
+            withContext(NonCancellable) {
+                runCatching { localNode?.stop() }
+                takeRadioOffTheAirAfterFatalError()
+            }
             setState(LinkState.Failed(fatal.message ?: "fatal error"))
         } finally {
             withContext(NonCancellable) { runCatching { localNode?.stop() } }
+        }
+    }
+
+    /**
+     * Stops the radio once the orchestrator has failed, so the network it was beaconing does not stay on the air.
+     *
+     * Business logic: after a fatal error nothing serves the network any more (the stack is stopped), yet a beacon left
+     * on would keep the kart rejoining it and its DHCP requests going unanswered until the user cancelled. The radio is
+     * stopped as [cancelPairing] stops it, and a later [start] / [startPairing] brings it up again. A failure to stop it
+     * is logged and does not change the outcome: the link still settles on [LinkState.Failed].
+     */
+    private suspend fun takeRadioOffTheAirAfterFatalError() {
+        try {
+            radioAp.stop()
+            log.i { "takeRadioOffTheAirAfterFatalError(): radio stopped, nothing is left on the air" }
+        } catch (failure: Exception) {
+            log.e(failure) { "takeRadioOffTheAirAfterFatalError(): stopping the radio failed -> message=${failure.message}" }
         }
     }
 

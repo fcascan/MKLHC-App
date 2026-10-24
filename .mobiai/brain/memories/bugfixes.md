@@ -254,3 +254,33 @@ Symptom (hardware run 2026-10-24 01:19): after driving out of range and back, th
 - core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
 - core/netstack/src/commonTest/kotlin/com/mklhc/core/netstack/tcp/TcpConnectionDirectTest.kt
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/session/SessionConfig.kt
+
+## A fatal orchestrator error left the network beaconing with nothing serving it
+
+- id: a-fatal-orchestrator-error-left-the-network-beaconing-with-n-20261024-051931
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: session
+- date: 2026-10-24
+
+Problem: when KartSessionRepository.orchestrate() ended in LinkState.Failed (seen 2026-10-21 when the kart refused its pairing service until the connect window ran out), the network stack was stopped but the radio kept beaconing the pairing network until the user pressed cancel, so the kart kept rejoining a dead network with its DHCP requests unanswered (the Open item of bugfix 'Pairing from the desktop app failed: the kart refused the first connect to its pairing service'). Fix 2026-10-24: the fatal catch stops the node and then the radio under NonCancellable (takeRadioOffTheAirAfterFatalError(), the same order as cancelPairing) before publishing Failed; a failure to stop is logged at error and the link still settles on Failed. A later start()/startPairing() brings the radio up again (relaunchOrchestrator -> radioAp.start()). The commandLock guarantees the old orchestrator's stop finishes before a new start. Test: KartSessionRepositoryTest.aFatalPairingErrorTakesThePairingNetworkOffTheAir (radio stopped and no beacon by the time Failed is seen, then Start beacons GAME again). Status: unit-tested, gate green; not seen on hardware (a fatal pairing error is rare).
+
+### Files
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+- core/data/src/commonTest/kotlin/com/mklhc/core/data/session/KartSessionRepositoryTest.kt
+
+## The desktop data directory was logged as created when it already existed
+
+- id: the-desktop-data-directory-was-logged-as-created-when-it-alr-20261024-051931
+- type: bug_fix
+- status: active
+- platform: kmp
+- area: app
+- date: 2026-10-24
+
+Problem (hardware run 2026-10-21 11:56): createOwnerOnlyDirectory() logged 'data directory created' although %APPDATA%\MKLHC and its pairing file had existed for hours (the identity was intact). Files.isDirectory answered false for the existing directory, probably while the antivirus held it, and Files.createDirectories then did nothing but the log still claimed a creation, which would hide a real loss of the pairing identity. Fix 2026-10-24: the directory itself is created with Files.createDirectory (parents with createDirectories), so 'created' is logged only after a real creation; a FileAlreadyExistsException goes to acceptExistingDirectoryOrRethrow(), which logs at warn 'the data directory was already there although the first check missed it, nothing created' and rethrows when a file, not a directory, is at the path. Same handling on the POSIX branch, plus the usual permission warning. The first check is injectable (firstLook) so tests can play the false negative. Tests: DesktopDataDirectoryTest aMissingDataDirectoryIsLoggedAsCreated, anExistingDataDirectoryTheFirstCheckMissesIsNotLoggedAsCreated, aFileWhereTheDataDirectoryGoesIsStillAnError. Status: gate green on Windows; the POSIX branch runs only on Linux/macOS (no host here).
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopDataDirectory.kt
+- app/src/desktopTest/kotlin/com/mklhc/app/desktop/DesktopDataDirectoryTest.kt

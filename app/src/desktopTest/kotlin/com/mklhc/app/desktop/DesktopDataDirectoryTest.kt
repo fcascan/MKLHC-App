@@ -2,6 +2,7 @@ package com.mklhc.app.desktop
 
 import com.mklhc.app.LogCapture
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermissions
@@ -11,6 +12,8 @@ import java.util.concurrent.TimeoutException
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -70,6 +73,40 @@ class DesktopDataDirectoryTest {
 
         assertTrue(Files.isDirectory(dataDirectory))
         assertTrue(Files.isRegularFile(dataDirectory.resolve(DesktopDataDirectory.LOCK_FILE_NAME)))
+    }
+
+    // ---- The log tells a created directory from an existing one -----------------------------------------
+
+    @Test
+    fun aMissingDataDirectoryIsLoggedAsCreated() {
+        val logs = LogCapture()
+
+        createOwnerOnlyDirectory(dataDirectory, logs.logger())
+
+        assertTrue(Files.isDirectory(dataDirectory))
+        assertTrue(logs.has("createOwnerOnlyDirectory(): data directory created"), logs.text())
+    }
+
+    @Test
+    fun anExistingDataDirectoryTheFirstCheckMissesIsNotLoggedAsCreated() {
+        // On hardware Files.isDirectory once answered false for an existing directory (a transient lock, probably the
+        // antivirus): the log then claimed a creation that never happened, which would hide a real identity loss.
+        Files.createDirectories(dataDirectory)
+        val logs = LogCapture()
+
+        createOwnerOnlyDirectory(dataDirectory, logs.logger(), firstLook = { false })
+
+        assertTrue(Files.isDirectory(dataDirectory))
+        assertFalse(logs.has("data directory created"), logs.text())
+        assertTrue(logs.has("WARN: acceptExistingDirectoryOrRethrow(): the data directory was already there"), logs.text())
+    }
+
+    @Test
+    fun aFileWhereTheDataDirectoryGoesIsStillAnError() {
+        Files.createDirectories(dataDirectory.parent)
+        Files.writeString(dataDirectory, "not a directory")
+
+        assertFailsWith<FileAlreadyExistsException> { createOwnerOnlyDirectory(dataDirectory, LogCapture().logger()) }
     }
 
     // ---- Owner-only on POSIX ---------------------------------------------------------------------------
