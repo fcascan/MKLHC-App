@@ -108,7 +108,7 @@ class FakeKartSession(
         when (value) {
             is Telemetry.BatteryStatus -> batteryFlow.value = value
             is Telemetry.Imu -> imuFlow.tryEmit(value)
-            is Telemetry.Unknown -> Unit
+            is Telemetry.FrameStatus, is Telemetry.Unknown -> Unit
         }
     }
 

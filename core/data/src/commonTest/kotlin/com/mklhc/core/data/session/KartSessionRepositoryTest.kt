@@ -418,7 +418,7 @@ class KartSessionRepositoryTest {
         awaitDriving(h.repo)
 
         val battery = batteryDatagram(bars = 2)
-        val typeThree = ByteArray(1 + 87) { (it * 7).toByte() }.also { it[0] = 3 } // not decoded, still tapped
+        val typeThree = ByteArray(1 + 87) { (it * 7).toByte() }.also { it[0] = 3 } // a frame status, tapped as received
         val unknownType = byteArrayOf(0x7f, 1, 2)
         h.kart.sendTelemetry(battery)
         h.kart.sendTelemetry(typeThree)
@@ -461,22 +461,57 @@ class KartSessionRepositoryTest {
     }
 
     @Test
-    fun theFirstTypeThreeTelemetryRecordIsLoggedOnceNotEveryOne() = runTest {
+    fun theFirstFrameStatusIsLoggedOnceWithItsDriveEchoAndSurfacesAsTelemetry() = runTest {
         val logs = CapturingLogWriter()
         val h = harness(log = capturingLogger(logs, "KartSessionRepository"))
         h.repo.start()
         h.kart.runGameSession()
         awaitDriving(h.repo)
 
-        repeat(3) { h.kart.sendTelemetry(ByteArray(1 + 87).also { it[0] = 3 }) }
+        h.kart.sendTelemetry(frameStatusDatagram(timerMicros = 1_234_567, throttle = -64, steering = 127))
+        repeat(2) { h.kart.sendTelemetry(frameStatusDatagram(timerMicros = 1_300_000, throttle = 0, steering = 0)) }
+
+        val status = withTimeout(5_000) {
+            h.repo.telemetry.first { it is Telemetry.FrameStatus && it.current.timerMicros == 1_300_000L }
+        } as Telemetry.FrameStatus
+        assertEquals(1_300_000L, status.driveEcho.timerMicros)
+        assertEquals(
+            listOf("telemetryLoop(): first frame status decoded (one line per session) -> kartTimerMicros=1234567 throttleEcho=-64 steeringEcho=127"),
+            logs.entries.filter { "frame status" in it.message }.map { it.message },
+        )
+    }
+
+    @Test
+    fun theFirstTypeThreeDatagramTooShortToDecodeIsWarnedOnceNotEveryOne() = runTest {
+        val logs = CapturingLogWriter()
+        val h = harness(log = capturingLogger(logs, "KartSessionRepository"))
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        repeat(3) { h.kart.sendTelemetry(ByteArray(1 + 10).also { it[0] = 3 }) }
         h.kart.sendTelemetry(batteryDatagram(bars = 2)) // sent last, so once it is decoded the type 3 ones were too
         withTimeout(5_000) { h.repo.telemetry.first { it is Telemetry.BatteryStatus } }
 
-        val typeThreeLines = logs.entries.filter { "type 3 telemetry" in it.message }.map { it.message }
+        val lines = logs.entries.filter { "type 3" in it.message }
         assertEquals(
-            listOf("telemetryLoop(): type 3 telemetry is arriving, not decoded (one line per session) -> size=87"),
-            typeThreeLines,
+            listOf("telemetryLoop(): type 3 telemetry too short to decode (one line per session) -> size=10 expected=87"),
+            lines.map { it.message },
         )
+        assertEquals(Severity.Warn, lines.single().severity)
+    }
+
+    /**
+     * A type 3 frame status datagram: the type octet, then an 87-octet payload with both camera records stamped
+     * [timerMicros] and the echo carrying it, [throttle] and [steering].
+     */
+    private fun frameStatusDatagram(timerMicros: Int, throttle: Int, steering: Int): ByteArray = ByteArray(1 + 87).also {
+        it[0] = 3
+        for (offset in intArrayOf(7, 39, 71)) {
+            for (i in 0 until 4) it[1 + offset + i] = (timerMicros shr (8 * i)).toByte()
+        }
+        it[1 + 79] = throttle.toByte()
+        it[1 + 80] = steering.toByte()
     }
 
     /** A type 1 battery status datagram: the type octet, then the 0x1f-octet payload with [bars] in payload octet 3. */

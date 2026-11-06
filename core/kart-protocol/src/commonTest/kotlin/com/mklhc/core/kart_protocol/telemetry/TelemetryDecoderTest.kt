@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 
 /**
  * Known-answer tests for [TelemetryDecoder]: the dispatch on the type octet, the type-1 battery status,
- * and the unknown / type-3 / empty cases.
+ * and the unknown / empty cases (type 3 is covered by FrameStatusDecoderTest).
  *
  * The battery vectors are hand-built from the reference handler (OpenKart `handle_status`): the type
  * octet is stripped, the remaining payload must be 0x1f octets, `cable_connected = payload[0] & 1` and
@@ -137,16 +137,6 @@ class TelemetryDecoderTest {
 
         assertFalse(writer.logged(Severity.Warn))
         assertFalse(writer.logged(Severity.Error))
-    }
-
-    @Test
-    fun `type 3 is Unknown with its payload kept and is not logged, since it arrives about 30 times a second`() {
-        val packet = hexBytes("03 11 22 33")
-
-        val telemetry = decoder.decode(packet)
-
-        assertEquals(Telemetry.Unknown(type = 3, raw = hexBytes("11 22 33")), telemetry)
-        assertTrue(writer.entries.isEmpty(), "nothing logged per type 3 datagram: ${writer.entries.map { it.message }}")
     }
 
     @Test

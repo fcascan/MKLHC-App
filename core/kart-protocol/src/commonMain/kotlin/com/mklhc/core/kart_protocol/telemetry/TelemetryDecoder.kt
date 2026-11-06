@@ -10,15 +10,18 @@ import co.touchlab.kermit.Logger
  * Business logic: the first octet of every telemetry datagram is its type and the rest is the payload.
  * Type 1 is the battery status (the reference handler requires a 0x1f-octet payload and reads the cable
  * bit from octet 0 and the battery bars from octet 3); type 2 is the IMU packet (see [ImuDecoder]); type
- * 3 is not specified yet (the wiki calls it "motion feedback", the reference ignores it), so it is kept
- * as [Telemetry.Unknown] without a log line (the kart sends one about 30 times a second; the session logs
- * the first one); every other type is reported as [Telemetry.Unknown] with a warning, as the reference does.
+ * 3 is the frame status (see [FrameStatusDecoder]; the wiki calls it "motion feedback", the reference
+ * ignores it), handled without a log line, even when too short, since the kart sends one about 30 times
+ * a second (the session reports the first one); every other type is reported as [Telemetry.Unknown] with
+ * a warning, as the reference does. Type 3's layout comes from this project's own capture, not from the
+ * reference.
  *
  * The decoder never throws on what the kart sends, since one malformed datagram must not stop the
- * stream: an empty datagram, a type-1 or type-2 payload too short to read, and any other type all come
- * back as [Telemetry.Unknown] carrying the payload, and the reason is logged. One deliberate difference
- * from the reference: a type-1 payload longer than 0x1f octets is still decoded (with a warning) rather
- * than dropped, since only octets 0 and 3 are read and a longer status record should not blank the HUD.
+ * stream: an empty datagram, a type-1, type-2 or type-3 payload too short to read, and any other type
+ * all come back as [Telemetry.Unknown] carrying the payload, and the reason is logged (except for type
+ * 3). One deliberate difference from the reference: a type-1 payload longer than 0x1f octets is still
+ * decoded (with a warning) rather than dropped, since only octets 0 and 3 are read and a longer status
+ * record should not blank the HUD.
  *
  * Stateless; safe to share between threads.
  *
@@ -46,8 +49,9 @@ class TelemetryDecoder(
         return when (type) {
             TYPE_BATTERY_STATUS -> decodeBatteryStatus(payload) ?: Telemetry.Unknown(type, payload)
             TYPE_IMU -> ImuDecoder.decode(payload, log) ?: Telemetry.Unknown(type, payload)
-            // Not logged here: it arrives about 30 times a second, so a line per datagram would drown the log.
-            TYPE_MOTION_FEEDBACK -> Telemetry.Unknown(type, payload)
+            // Not logged here, even when too short: it arrives about 30 times a second, so a line per datagram would
+            // drown the log.
+            TYPE_FRAME_STATUS -> FrameStatusDecoder.decode(payload) ?: Telemetry.Unknown(type, payload)
             else -> {
                 log.w { "decode(): unknown telemetry type -> type=0x${type.toString(16).padStart(2, '0')} size=${payload.size}" }
                 Telemetry.Unknown(type, payload)
@@ -82,8 +86,11 @@ class TelemetryDecoder(
         /** Type octet of the IMU datagram. */
         const val TYPE_IMU = 2
 
-        /** Type octet of the datagram the wiki lists as "motion feedback" (layout not specified). */
-        const val TYPE_MOTION_FEEDBACK = 3
+        /** Type octet of the frame status datagram (the wiki lists it as "motion feedback"). */
+        const val TYPE_FRAME_STATUS = 3
+
+        /** Payload octets a frame status needs, after the type octet; a shorter one comes back as [Telemetry.Unknown]. */
+        const val FRAME_STATUS_PAYLOAD_SIZE = FrameStatusDecoder.PAYLOAD_SIZE
 
         private const val TAG = "TelemetryDecoder"
 

@@ -16,6 +16,9 @@ internal fun ByteArray.s32LeAt(offset: Int): Int =
 /** The unsigned little-endian 32-bit value at [offset], as a [Long] (0..4_294_967_295). */
 internal fun ByteArray.u32LeAt(offset: Int): Long = s32LeAt(offset).toLong() and 0xFFFFFFFFL
 
+/** The little-endian IEEE 754 single-precision value at [offset]. */
+internal fun ByteArray.f32LeAt(offset: Int): Float = Float.fromBits(s32LeAt(offset))
+
 /** Three consecutive signed little-endian 32-bit values starting at [offset], as (x, y, z). */
 internal fun ByteArray.vector3S32At(offset: Int): Vector3Int =
     Vector3Int(s32LeAt(offset), s32LeAt(offset + 4), s32LeAt(offset + 8))

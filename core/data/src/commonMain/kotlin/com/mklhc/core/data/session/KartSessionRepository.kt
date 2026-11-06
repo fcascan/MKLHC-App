@@ -813,10 +813,20 @@ class KartSessionRepository(
         return connected.await()
     }
 
+    /**
+     * Receives the kart's telemetry datagrams until the endpoint closes: each goes to [telemetryDatagramTap] as
+     * received, is decoded and published on [telemetry], a battery status also on [battery] and an IMU packet on [imu].
+     *
+     * Business logic: type 3 frame statuses arrive about 30 times a second, so they are reported once per loop: the
+     * first one decoded at info (with its echoed drive command, which shows the kart receives what the app sends) and
+     * the first one too short to decode at warn.
+     */
     private suspend fun telemetryLoop(udp: UdpEndpoint) {
         val decoder = TelemetryDecoder()
         var tapFailures = 0
-        var typeThreeSeen = false
+        // Each reported once per telemetry loop: the kart sends type 3 about 30 times a second.
+        var frameStatusSeen = false
+        var undecodableTypeThreeSeen = false
         try {
             while (true) {
                 val datagram = udp.receive()
@@ -833,10 +843,20 @@ class KartSessionRepository(
                 when (value) {
                     is Telemetry.BatteryStatus -> _battery.value = value
                     is Telemetry.Imu -> _imu.emit(value)
-                    is Telemetry.Unknown -> if (value.type == TelemetryDecoder.TYPE_MOTION_FEEDBACK && !typeThreeSeen) {
-                        // Once per telemetry loop: the kart sends it about 30 times a second and nothing decodes it yet.
-                        typeThreeSeen = true
-                        log.i { "telemetryLoop(): type 3 telemetry is arriving, not decoded (one line per session) -> size=${value.raw.size}" }
+                    is Telemetry.FrameStatus -> if (!frameStatusSeen) {
+                        frameStatusSeen = true
+                        log.i {
+                            "telemetryLoop(): first frame status decoded (one line per session) -> " +
+                                "kartTimerMicros=${value.current.timerMicros} throttleEcho=${value.driveEcho.throttle} " +
+                                "steeringEcho=${value.driveEcho.steering}"
+                        }
+                    }
+                    is Telemetry.Unknown -> if (value.type == TelemetryDecoder.TYPE_FRAME_STATUS && !undecodableTypeThreeSeen) {
+                        undecodableTypeThreeSeen = true
+                        log.w {
+                            "telemetryLoop(): type 3 telemetry too short to decode (one line per session) -> " +
+                                "size=${value.raw.size} expected=${TelemetryDecoder.FRAME_STATUS_PAYLOAD_SIZE}"
+                        }
                     }
                 }
             }

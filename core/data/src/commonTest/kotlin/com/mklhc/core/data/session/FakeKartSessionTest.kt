@@ -4,6 +4,8 @@ import app.cash.turbine.test
 import com.mklhc.core.domain.KartInfo
 import com.mklhc.core.domain.LinkState
 import com.mklhc.core.kart_protocol.teleop.DriveCommand
+import com.mklhc.core.kart_protocol.telemetry.CameraFrameRecord
+import com.mklhc.core.kart_protocol.telemetry.DriveCommandEcho
 import com.mklhc.core.kart_protocol.telemetry.ImuFlags
 import com.mklhc.core.kart_protocol.telemetry.Quaternion
 import com.mklhc.core.kart_protocol.telemetry.QuaternionRaw
@@ -130,10 +132,35 @@ class FakeKartSessionTest {
     @Test
     fun unknownTelemetryOnlyUpdatesTheTelemetryFlow() {
         val session = FakeKartSession()
-        val unknown = Telemetry.Unknown(type = 3, raw = byteArrayOf(9))
+        val unknown = Telemetry.Unknown(type = 0x7F, raw = byteArrayOf(9))
         session.emitTelemetry(unknown)
         assertEquals(unknown, session.telemetry.value)
         assertNull(session.battery.value)
+    }
+
+    @Test
+    fun aFrameStatusOnlyUpdatesTheTelemetryFlow() = runTest {
+        val session = FakeKartSession()
+        val camera = CameraFrameRecord(
+            timerMicros = 1_000L,
+            exposure = 15_900f,
+            gain = 8.5f,
+            brightness = 70f,
+            redGain = 1344,
+            greenGain = 1024,
+            blueGain = 2680,
+        )
+        val status = Telemetry.FrameStatus(
+            current = camera,
+            previous = camera.copy(timerMicros = 967L),
+            driveEcho = DriveCommandEcho(timerMicros = 1_000L, throttle = 63, steering = 0, unknownValue = 0.09f),
+        )
+        session.imu.test {
+            session.emitTelemetry(status)
+            assertEquals(status, session.telemetry.value)
+            assertNull(session.battery.value)
+            expectNoEvents()
+        }
     }
 
     @Test

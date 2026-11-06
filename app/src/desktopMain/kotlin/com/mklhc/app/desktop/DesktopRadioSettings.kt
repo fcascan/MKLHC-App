@@ -36,7 +36,7 @@ import java.nio.file.Path
  * - `MKLHC_VIDEO_DUMP`: a folder to dump the kart's raw video datagrams into, one file per run (see
  *   [DatagramDump]); unset by default, which dumps nothing. A diagnostic for studying the video stream.
  * - `MKLHC_TELEMETRY_DUMP`: the same for the telemetry datagrams, in their own file; unset by default. A diagnostic for
- *   studying the telemetry records the app does not decode yet. It may name the same folder as the video dump.
+ *   studying the telemetry records with real data. It may name the same folder as the video dump.
  *
  * A variable set to a blank value counts as unset. A path in double quotes is taken without them, since cmd's
  * `set MKLHC_RADIOD="C:\Program Files\radiod.exe"` keeps the quotes in the value. A value that cannot be used (a path

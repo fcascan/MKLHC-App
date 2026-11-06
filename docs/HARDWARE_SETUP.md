@@ -295,7 +295,7 @@ on the Kart link screen (see [Choose the adapter](#choose-the-adapter)).
 | `MKLHC_DATA_DIR` | Where the app keeps its pairing identity. | `%APPDATA%\MKLHC` on Windows, `~/Library/Application Support/MKLHC` on macOS, `$XDG_CONFIG_HOME/MKLHC` (or `~/.config/MKLHC`) on Linux. |
 | `MKLHC_DEMO` | `1` runs the scripted demo instead: no radio and no kart, for working on the screens. | `0` |
 | `MKLHC_VIDEO_DUMP` | A folder to dump the kart's raw video datagrams into, for studying the video stream (see [Dump the raw video](#dump-the-raw-video)). | Unset: no dump. |
-| `MKLHC_TELEMETRY_DUMP` | A folder to dump the kart's raw telemetry datagrams into, for studying the records the app does not decode yet (see [Dump the raw telemetry](#dump-the-raw-telemetry)). | Unset: no dump. |
+| `MKLHC_TELEMETRY_DUMP` | A folder to dump the kart's raw telemetry datagrams into, for studying the telemetry records with real data (see [Dump the raw telemetry](#dump-the-raw-telemetry)). | Unset: no dump. |
 
 For UI work without hardware, use `MKLHC_DEMO=1` or `./gradlew :app:run --args="--demo"`; the window title then ends in
 `(demo)`. A variable set to an empty value counts as unset. A value the app cannot use (for example `MKLHC_DEMO=yes`)
@@ -483,8 +483,10 @@ runs without the dump.
 ### Dump the raw telemetry
 
 The kart also streams telemetry, a datagram per record whose first octet is its type: the battery status (type 1) and
-the motion sensor (type 2) are decoded for the cockpit, while type 3 (87 octets after the type, about 30 a second) is not decoded yet; the log
-says when the first one arrives (`telemetryLoop(): type 3 telemetry is arriving, not decoded`).
+the motion sensor (type 2) are decoded for the cockpit, and type 3 (87 octets after the type, about 30 a second,
+one per camera frame) holds the camera's per-frame values and the drive command the kart received; its layout was
+measured from a dump and the meaning of the camera values is not confirmed yet. The log says when the first one is
+decoded (`telemetryLoop(): first frame status decoded`).
 To study it, set `MKLHC_TELEMETRY_DUMP` to a folder before starting the app (in PowerShell,
 `$env:MKLHC_TELEMETRY_DUMP = "spike-captures\telemetry"`); it may be the same folder as the video dump, and either dump
 works without the other. The app then writes every datagram that reaches its telemetry port, type octet included and

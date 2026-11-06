@@ -1,7 +1,7 @@
 // The telemetry type dispatch and the battery status (type 1) are ported from OpenKart
 // https://github.com/OpenKart-SDK, openkartd/fuji.py (BSD-3-Clause). Copyright 2021 Sam Edwards.
 // The IMU variant (type 2) follows the layout of a community protocol wiki (Fuji kart protocol);
-// format spec, no code copied.
+// format spec, no code copied. The frame status variant (type 3) follows a layout this project measured from a capture.
 package com.mklhc.core.kart_protocol.telemetry
 
 /**
@@ -9,9 +9,9 @@ package com.mklhc.core.kart_protocol.telemetry
  *
  * Business logic: the kart streams telemetry over UDP; the first octet of every datagram is a type and
  * the rest is that type's payload. [TelemetryDecoder] turns a datagram into exactly one of these:
- * [BatteryStatus] (type 1), [Imu] (type 2), or [Unknown] for anything it cannot or need not interpret
- * (type 3 whose meaning is not specified, unrecognised types, and malformed or too-short payloads). The
- * decoder never throws on kart data, because a malformed datagram must not stop the telemetry stream.
+ * [BatteryStatus] (type 1), [Imu] (type 2), [FrameStatus] (type 3), or [Unknown] for anything it cannot
+ * interpret (unrecognised types, and malformed or too-short payloads). The decoder never throws on kart
+ * data, because a malformed datagram must not stop the telemetry stream.
  */
 sealed interface Telemetry {
 
@@ -72,8 +72,28 @@ sealed interface Telemetry {
     ) : Telemetry
 
     /**
-     * A datagram that is not decoded: type 3 (unspecified), an unrecognised type, an empty datagram, or
-     * a type 1 / type 2 payload too short to read.
+     * Type 3: the kart's per-frame camera record, the previous frame's, and the drive command it received.
+     *
+     * Business logic: the kart sends one with every camera frame, 30 a second. [current] and [previous] are
+     * the camera's records for this frame and the one before ([previous] equals the last datagram's
+     * [current], so a lost datagram shows as this [previous] differing from the last [current] received); [driveEcho] is the throttle and steering
+     * the kart reports having received. The wiki this protocol work follows calls type 3 "motion
+     * feedback", but a capture showed camera values and a command echo, not motion: see
+     * [CameraFrameRecord] for which meanings are still hypotheses.
+     *
+     * @property current the camera record of this frame.
+     * @property previous the camera record of the previous frame.
+     * @property driveEcho the drive command the kart received, stamped with this frame's timer.
+     */
+    data class FrameStatus(
+        val current: CameraFrameRecord,
+        val previous: CameraFrameRecord,
+        val driveEcho: DriveCommandEcho,
+    ) : Telemetry
+
+    /**
+     * A datagram that is not decoded: an unrecognised type, an empty datagram, or a type 1 / 2 / 3
+     * payload too short to read.
      *
      * Business logic: the payload is kept so it can be logged or captured for later analysis. Equality
      * compares [raw] by content.

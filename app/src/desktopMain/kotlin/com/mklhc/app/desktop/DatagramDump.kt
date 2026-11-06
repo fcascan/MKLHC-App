@@ -22,7 +22,7 @@ import java.time.format.DateTimeFormatter
 /**
  * Writes every datagram the kart sends on one of its streams ([Stream]), exactly as received, to a file, so the stream
  * can be studied offline: the video's layout against what [com.mklhc.core.kart_protocol.video.LspVideoReassembler]
- * assumes, and the telemetry records [com.mklhc.core.kart_protocol.telemetry.TelemetryDecoder] does not decode yet.
+ * assumes, and the telemetry records against what [com.mklhc.core.kart_protocol.telemetry.TelemetryDecoder] reads.
  *
  * Business logic: the desktop app opens one dump per stream and run when that stream's variable names a folder
  * (`MKLHC_VIDEO_DUMP`, `MKLHC_TELEMETRY_DUMP`; see [DesktopRadioSettings]) and hands it each datagram's UDP payload

@@ -582,3 +582,20 @@ Decision (author, 2026-10-24): keep the fixed local ports (41003 control, 41007 
 ### Files
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/session/SessionConfig.kt
 - core/netstack/src/commonMain/kotlin/com/mklhc/core/netstack/tcp/TcpConnection.kt
+
+## Telemetry type 3 is decoded as Telemetry.FrameStatus (camera records and drive command echo)
+
+- id: telemetry-type-3-is-decoded-as-telemetry-framestatus-camera-20261106-042921
+- type: architecture_decision
+- status: active
+- platform: kmp
+- area: kart-protocol
+- date: 2026-11-06
+
+Decision: TelemetryDecoder turns type 3 into Telemetry.FrameStatus(current, previous: CameraFrameRecord, driveEcho: DriveCommandEcho) through the internal FrameStatusDecoder, following the layout in the testing entry 'Telemetry type 3 layout measured from a dump' (payload offsets: camera records at 7 and 39, echo at 71; 87 octets). TYPE_MOTION_FEEDBACK became TYPE_FRAME_STATUS. Camera property names (exposure, gain, brightness, red/green/blue gain) state the most likely meaning; the KDoc says it is a hypothesis. The always-zero octets are neither read nor checked. Shorter than 87 octets: Telemetry.Unknown(3); longer: decoded, extra ignored. TelemetryDecoder logs nothing for type 3 (30/s); KartSessionRepository.telemetryLoop logs 'first frame status decoded (one line per session)' at info with the kart timer and the echoed throttle and steering, and 'type 3 telemetry too short to decode (one line per session)' at warn, once per loop each. Nothing in the UI uses it yet; it is published on KartSession.telemetry. Why: one capture fitted the layout in 6,916 of 6,916 records, and the echo lets a later change check that the kart receives what the app sends. Verified: unit tests on synthetic records (never capture bytes), gate green, and a throwaway local test that ran the Kotlin decoder over the real dump (6,916 FrameStatus, 0 undecoded, previous equal to the last current 6,915 of 6,915, green gain 1024 and gain in 1/16 steps in every record), deleted afterwards. Not yet seen live: the 'first frame status decoded' line in a hardware run log.
+
+### Files
+- core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/telemetry/FrameStatusDecoder.kt
+- core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/telemetry/FrameStatusRecords.kt
+- core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/telemetry/Telemetry.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
