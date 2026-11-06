@@ -114,7 +114,8 @@ The app is debugged from its logs after a hardware run, so a line that cannot be
   per-frame paths. A line per frame (tens per second) drowns the log; log the change, not the steady state.
 - **The desktop app writes every line to a file** (`<data dir>/logs/`, the ten newest runs kept), and the author shares
   those files. So these rules also decide what leaves the machine: never a seed, a PSK, a key, the master secret, a
-  token or a device identity, at any level.
+  token or a device identity, at any level. The kart's serial number is the one exception: it may appear in the log
+  (section 8 keeps it out of everything committed).
 - Helper and business-logic functions get descriptive, unique names, so the `function():` prefix lands on one place;
   `mobiai graph search <Name>` checks that in one call. Overrides and callbacks naturally repeat and are fine.
 
@@ -185,6 +186,10 @@ regenerated with `mobiai graph init`, never edited.
 - Never name the kart's manufacturer, console or game anywhere (code, docs, commits, UI, Brain); say "the kart".
 - Never log or print seeds, PSKs, keys, the master secret, tokens or device identities. Never paste a pairing payload
   into an online service.
+- The serial number of the author's kart may appear in the log, but never in the Brain or in anything that can be
+  committed (code, tests, test vectors, docs, commit messages); a Brain entry or a summary says "the kart's serial".
+  A test that needs a serial uses an invented one with the same pattern as a real one: three capital letters followed
+  by eleven digits.
 - Real captures (`spike-captures/`, `*.viddump`, `*.teldump`, `*.pcap`) hold decrypted traffic, the camera picture or
   the kart's recorded motion: they stay local and never go into the repository or a test.
 - Replies to the author are in Spanish; code, comments, commit messages, Brain entries and repository docs are in

@@ -295,3 +295,36 @@ Capture: MKLHC_TELEMETRY_DUMP, run 2026-11-06 01:00 (230 s, wheels off the groun
 
 ### Files
 - core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/telemetry/TelemetryDecoder.kt
+
+## A hardware run reuses the Gradle daemon the agent started and inherits the Claude app's virtualized APPDATA
+
+- id: a-hardware-run-reuses-the-gradle-daemon-the-agent-started-an-20261106-045116
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: workflow
+- date: 2026-11-06
+
+Found 2026-11-06: the author's ':app:run' from a normal PowerShell at 01:34 and 01:37 ran in Gradle daemon pid 963188, which the agent had started at 00:05 from the Claude desktop app (MSIX) for its test runs (daemon log: the same daemon served both). The app JVM forked by that daemon inherits the package's file virtualization, so it read and wrote the virtualized %LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\MKLHC\pairing.preferences_pb (identity A, BSSID 32:8d:c9:b5:ef:3b; the file changed at 01:02:54, during that run's pairing), while the log files still went to the real %APPDATA%\MKLHC\logs. Effects: the kart, paired with identity B (16:0b:b4:ec:82:0c), never joined on Start, so every run of the day needed Pair (which moved the kart to A), and the environment variables for the dumps did not reach the app. Rule: before any hardware run that follows agent builds, run '.\gradlew.bat --stop' from the normal PowerShell (or Android Studio's terminal) and then ':app:run', so a fresh daemon starts outside the package. Check in the log: the BSSID in 'serve(): beacon started' must be identity B's. Still to confirm on the next run that --stop gives identity B back (the kart will then need one Pair to move back to B).
+
+## Hardware recoveries 2026-11-06: kart power cycle, adapter replug and out-of-range all return to Driving by themselves
+
+- id: hardware-recoveries-2026-11-06-kart-power-cycle-adapter-repl-20261106-045116
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: session
+- date: 2026-11-06
+
+Run 2026-11-06 01:37-01:46 (desktop, identity A, see the workflow entry on the Gradle daemon). Kart switched off for 72 s: it deauthenticates on power-off ('station left', not the 20 s inactivity drop, which stays unexercised), and on power-on it rejoined and reached Driving by itself in 1 s. Adapter unplugged while driving: radiod's RX loop ended (exit code 3), radiod was relaunched, the screen showed the unplug message, the adapter was back 7 s later, the radio came up again on the same network 47 s after that and the kart rejoined by itself, Driving 58 s after the unplug with no Pair or Start (closes B14; it also covers the radiod crash and relaunch path of B9). Out of range three times: each drop came from the 5202 keepalive (4 probes unanswered) and the session was back in Driving 3-7 s after the signal returned; once an RCD invoke timed out during the handshake and the next attempt succeeded. The stale-connection SYN_SENT RST of B15 never ran (no 'unacceptable ACK while connecting'). The type 3 line 'first frame status decoded' appeared once per session as designed. Not covered: camera hypothesis (no dumps that run), HUD with real motion, kart info box, the 30-minute soak.
+
+## radiod radio bring-up takes about 47 s, almost all of it writing the baseband and RF tables
+
+- id: radiod-radio-bring-up-takes-about-47-s-almost-all-of-it-writ-20261106-045117
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: radiod
+- date: 2026-11-06
+
+Measured 2026-11-06 on the TP-Link Archer T3U (RTL8822BU, cut 3) on WinUSB, in two bring-ups of the same run (first Start and after an adapter replug), both about 47 s: USB open, power-on and firmware download take under 0.3 s; 'applying BB phy_reg (2984 words) + agc_tab (21368 words)' takes 31 s and 'applying RF radioa (10638 words) + radiob (9234 words)' 12.6 s, so about 1.3 ms per table entry, consistent with one synchronous USB control transfer per register write (plus any delay entries in the RF tables). This is the wait the user sees on every Start and after every replug ('the radio is starting again, which takes up to a minute'). Not investigated yet: whether the tables are filtered by their condition entries (rfe_type, band) before writing, whether consecutive writes can be batched, and how long the same tables take on Linux or Android.
