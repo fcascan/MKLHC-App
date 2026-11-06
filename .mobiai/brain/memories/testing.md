@@ -281,3 +281,17 @@ Capture: set MKLHC_TELEMETRY_DUMP to a folder (may be the video dump's folder) a
 - app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopKartRuntime.kt
 - core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
 - core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/telemetry/TelemetryDecoder.kt
+
+## Telemetry type 3 layout measured from a dump: camera AE/AWB records and the drive command echo
+
+- id: telemetry-type-3-layout-measured-from-a-dump-camera-ae-awb-r-20261106-041350
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: kart-protocol
+- date: 2026-11-06
+
+Capture: MKLHC_TELEMETRY_DUMP, run 2026-11-06 01:00 (230 s, wheels off the ground then on the floor, tilts by hand), checked against that run's log. Rates: type 1 battery 10/s (32 octets), type 2 IMU 30/s, type 3 30/s. Type 3 payload (after the type octet) is always 87 octets and its structure is certain (6,916 of 6,916 records): octets 0-6 zero; record A at 7-38 (32 octets); record B at 39-70 is byte-identical to the previous datagram's record A; record C at 16 octets, 71-86. Each record starts with a u32 LE kart timer in microseconds (same clock as the type 2 IMU timer), stepping 33.0-33.6 ms, so one record per camera frame at 30 fps; A and C carry the same timer. Then 4 zero octets. Record A after that (offsets in the payload): 15 f32, 6000-15900, settles at 15900; 19 f32, 5.625-15.875 in exact 1/16 steps, saturating at 15.875; 23 f32, 0-95.5 (0 only in the first record); 27 u16, 1152-1731; 29 u16, always 1024; 31 u16, 1792-3093; 33-38 zero. None of them follows throttle or steering (constant through steering and throttle tests with the kart still); they move when the kart is tilted or moved by hand and when the view changes: pointed up, 15 drops to about 12000, 19 to about 6 and 23 rises to 85-95; in a dark spot 19 saturates at 15.875 and 23 falls to 5-8. Hypothesis, not confirmed against the picture: camera auto-exposure and white balance per frame (15 exposure time, 19 analog gain in 1/16 steps, 23 measured brightness, 27/29/31 red/green/blue gains in 1/1024 with green fixed at 1.0). Record C: 79 s8 = the throttle the app sent and 80 s8 = the steering, matching the command in force one record earlier in 99% of records (6,856 and 6,858 of 6,915; the rest at command changes); the brake light is not echoed; 81-82 zero; 83 f32 between -0.037 and 0.155 changes only while the kart moves with the steering turned and holds its value otherwise (meaning unknown). Type 3 carries no speed and no finer battery level, so it does not feed F7 or F9; type 2 velocity integrators move while driving and are the lead for speed. Status: layout measured offline from one capture; the camera hypothesis would be confirmed by a run with both MKLHC_VIDEO_DUMP and MKLHC_TELEMETRY_DUMP (record brightness against decoded picture brightness). Analysis scripts are throwaway (.ia-docs/telemetry-analysis/, scratch); the dump stays local.
+
+### Files
+- core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/telemetry/TelemetryDecoder.kt
