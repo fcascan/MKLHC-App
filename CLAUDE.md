@@ -25,6 +25,12 @@ How to work in this repository is in AGENTS.md, for every assistant. Read it and
 - **Hardware runs are launched by the author from Android Studio or a normal PowerShell, never from the Claude Terminal
   panel.** The Claude desktop app is an MSIX package, so a process it starts sees a virtualized `%APPDATA%` and reads
   another pairing identity than the one the kart is paired with.
+- **Every hardware command handed to the author starts with `.\gradlew.bat --stop`**, for example
+  `Set-Location C:\Workspace\Android\MKLHC-App; .\gradlew.bat --stop; .\gradlew.bat :app:run`. A Gradle daemon the agent
+  started for its own builds lives inside the same MSIX package, and an `:app:run` that reuses it inherits the
+  virtualized `%APPDATA%` even when the author launches it from a normal PowerShell or Android Studio (found on
+  2026-11-06: the kart did not join on Start and the dump variables never reached the app). Remind the author that the
+  `serve(): beacon started` line must show the BSSID of the identity the kart is paired with.
 - A `SessionStart` hook (`.claude/settings.json`) runs `.claude/hooks/graph-freshness-check.sh`, which warns when the
   Graph index is missing, older than the last branch switch, or older than the latest commit. On the first two, run
   `mobiai graph init` (it writes only inside `.mobiai/graph/`) and mention that you did.
