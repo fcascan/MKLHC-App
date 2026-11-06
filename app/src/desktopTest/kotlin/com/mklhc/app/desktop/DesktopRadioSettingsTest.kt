@@ -148,6 +148,21 @@ class DesktopRadioSettingsTest {
     }
 
     @Test
+    fun theTelemetryDumpIsOffByDefaultAndItsOwnVariableNamesItsFolder() {
+        val dumps = absolute("captures", "telemetry")
+
+        assertNull(parse().telemetryDumpDirectory)
+        assertNull(parse(env = mapOf("MKLHC_TELEMETRY_DUMP" to "  ")).telemetryDumpDirectory, "blank counts as unset")
+        assertEquals(dumps, parse(env = mapOf("MKLHC_TELEMETRY_DUMP" to "\"$dumps\"")).telemetryDumpDirectory)
+        assertEquals(
+            workingDirectory().resolve("telemetry"),
+            parse(env = mapOf("MKLHC_TELEMETRY_DUMP" to "telemetry")).telemetryDumpDirectory,
+        )
+        assertNull(parse(env = mapOf("MKLHC_VIDEO_DUMP" to "video")).telemetryDumpDirectory, "the video dump alone dumps no telemetry")
+        assertNull(parse(env = mapOf("MKLHC_TELEMETRY_DUMP" to "telemetry")).videoDumpDirectory, "and the other way round")
+    }
+
+    @Test
     fun theDemoIsChosenByTheVariableOrTheArgument() {
         assertTrue(parse(env = mapOf("MKLHC_DEMO" to "1")).demo)
         assertTrue(parse(env = mapOf("MKLHC_DEMO" to "TRUE")).demo)
@@ -196,7 +211,7 @@ class DesktopRadioSettingsTest {
     @Test
     fun aPathTheFileSystemRejectsFailsNamingTheVariable() {
         // A NUL character is refused by the file system on every platform.
-        listOf("MKLHC_RADIOD", "MKLHC_DATA_DIR", "MKLHC_VIDEO_DUMP").forEach { variable ->
+        listOf("MKLHC_RADIOD", "MKLHC_DATA_DIR", "MKLHC_VIDEO_DUMP", "MKLHC_TELEMETRY_DUMP").forEach { variable ->
             val failure = assertFailsWith<IllegalArgumentException>(variable) { parse(env = mapOf(variable to "bad\u0000path")) }
             assertTrue(failure.message.orEmpty().startsWith(variable), failure.message)
         }

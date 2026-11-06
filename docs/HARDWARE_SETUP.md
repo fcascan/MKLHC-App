@@ -295,6 +295,7 @@ on the Kart link screen (see [Choose the adapter](#choose-the-adapter)).
 | `MKLHC_DATA_DIR` | Where the app keeps its pairing identity. | `%APPDATA%\MKLHC` on Windows, `~/Library/Application Support/MKLHC` on macOS, `$XDG_CONFIG_HOME/MKLHC` (or `~/.config/MKLHC`) on Linux. |
 | `MKLHC_DEMO` | `1` runs the scripted demo instead: no radio and no kart, for working on the screens. | `0` |
 | `MKLHC_VIDEO_DUMP` | A folder to dump the kart's raw video datagrams into, for studying the video stream (see [Dump the raw video](#dump-the-raw-video)). | Unset: no dump. |
+| `MKLHC_TELEMETRY_DUMP` | A folder to dump the kart's raw telemetry datagrams into, for studying the records the app does not decode yet (see [Dump the raw telemetry](#dump-the-raw-telemetry)). | Unset: no dump. |
 
 For UI work without hardware, use `MKLHC_DEMO=1` or `./gradlew :app:run --args="--demo"`; the window title then ends in
 `(demo)`. A variable set to an empty value counts as unset. A value the app cannot use (for example `MKLHC_DEMO=yes`)
@@ -475,9 +476,26 @@ payload. A run that was killed, or a full disk, can leave a short last record: d
 port's payloads are written, never the radio frames or the control traffic, so the file holds no network key; it does
 hold the camera's picture, so keep it on your machine (`*.viddump` files are ignored by git). The kart sends about
 280 KB per second; the dump stops by itself at 256 MiB, about a quarter of an hour, with a warning in the log, and also
-stops with a warning if a write fails (a full disk). The kart session goes on either way. A folder that cannot be created
-is reported at start-up (`openVideoDumpOrNull(): the video dump cannot be opened, running without it`) and the app runs
-without the dump.
+stops, with an error in the log, if a write fails (a full disk). The kart session goes on either way. A folder that cannot be created
+is reported at start-up (`openDatagramDumpOrNull(): the video dump cannot be opened, running without it`) and the app
+runs without the dump.
+
+### Dump the raw telemetry
+
+The kart also streams telemetry, a datagram per record whose first octet is its type: the battery status (type 1) and
+the motion sensor (type 2) are decoded for the cockpit, while type 3 (87 octets after the type, about 30 a second) is not decoded yet; the log
+says when the first one arrives (`telemetryLoop(): type 3 telemetry is arriving, not decoded`).
+To study it, set `MKLHC_TELEMETRY_DUMP` to a folder before starting the app (in PowerShell,
+`$env:MKLHC_TELEMETRY_DUMP = "spike-captures\telemetry"`); it may be the same folder as the video dump, and either dump
+works without the other. The app then writes every datagram that reaches its telemetry port, type octet included and
+before any decoding, to `telemetry-<date>-<time>.teldump`, one file per run, with the log lines
+`open(): dumping the raw telemetry datagrams -> path=<file>` and `close(): telemetry dump closed -> path=<file> ...`.
+
+The file has the video dump's layout with its own magic, `MKLHCTD1`, and the same rules: a local folder, a short last
+record dropped when reading, the 256 MiB cap (hours of telemetry), a stop with an error on a failed write, and a folder
+that cannot be created reported at start-up (`openDatagramDumpOrNull(): the telemetry dump cannot be opened, running
+without it`). It holds no network key, but it records how the kart moved during the run, so keep it on your machine
+(`*.teldump` files are ignored by git).
 
 ### If the app does not work
 

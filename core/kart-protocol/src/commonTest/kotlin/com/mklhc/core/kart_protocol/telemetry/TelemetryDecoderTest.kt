@@ -140,13 +140,13 @@ class TelemetryDecoderTest {
     }
 
     @Test
-    fun `type 3 is Unknown with its payload kept and is logged`() {
+    fun `type 3 is Unknown with its payload kept and is not logged, since it arrives about 30 times a second`() {
         val packet = hexBytes("03 11 22 33")
 
         val telemetry = decoder.decode(packet)
 
         assertEquals(Telemetry.Unknown(type = 3, raw = hexBytes("11 22 33")), telemetry)
-        assertTrue(writer.entries.isNotEmpty(), "type 3 is logged")
+        assertTrue(writer.entries.isEmpty(), "nothing logged per type 3 datagram: ${writer.entries.map { it.message }}")
     }
 
     @Test

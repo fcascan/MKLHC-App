@@ -264,3 +264,20 @@ Run the app from Android Studio or a normal terminal; inside the package, reads 
 - date: 2026-10-24
 
 Hardware run 2026-10-24 ~02:00, after the SYN_SENT RST fix (bugfix syn-sent-drops-a-challenge-ack-so-a-kart-holding-a-stale-con-20261024-044659): three out-of-range drops, each back to Driving by itself once the signal returned. Pattern per recovery: the kart deauths, reassociates, leases, handshakes RCD on 5202, then refuses the first SYN to 5103 once (handleRst connection refused) and accepts the retry 500 ms later from the same local port 41003. The stale-connection case of 01:19 did not recur: once the kart sent a segment on its old 41003 connection and TcpEndpoint.sendRstTo cleared it, the other two times our teardown RSTs reached the kart. So the new 'onSegmentSynSent(): unacceptable ACK while connecting' path is still unconfirmed on hardware; look for that line followed by 'connection established -> localPort=41003' in a future out-of-range log.
+
+## Raw telemetry dump (MKLHC_TELEMETRY_DUMP) for decoding type 3
+
+- id: raw-telemetry-dump-mklhc-telemetry-dump-for-decoding-type-3-20261106-031817
+- type: testing_pattern
+- status: active
+- platform: kmp
+- area: kart-protocol
+- date: 2026-11-06
+
+Capture: set MKLHC_TELEMETRY_DUMP to a folder (may be the video dump's folder) and run the desktop app; every datagram reaching the telemetry port (5116), type octet included and before decoding, goes to telemetry-<date>-<time>.teldump. The video dump became DatagramDump with a Stream enum (VIDEO keeps magic MKLHCVD1 and .viddump unchanged; TELEMETRY uses MKLHCTD1 and .teldump), same record layout: u64 LE receive time in microseconds, u32 LE length, payload; short last record dropped by a reader. KartSessionRepository has telemetryDatagramTap mirroring videoDatagramTap (a failing tap is logged once per loop at error and never stops the telemetry). Measured from the 2026-10-24 01:49 run log: type 3 payload is always 87 octets after the type octet, about 30 per second while streaming (14,767 in 593 s including out-of-range gaps). TelemetryDecoder no longer logs each type 3 datagram (that line was 14,767 debug lines in that run); the session logs 'telemetryLoop(): type 3 telemetry is arriving, not decoded' once per telemetry loop. Offline helper (git-ignored): .ia-docs/telemetry-analysis/teldump_summary.py (rates per type, per-octet table, candidate LE u16/s16/u32/f32 fields, CSV export); capture sequence in .ia-docs/plans/2026-11-06-b8-telemetry-capture.md. Status: unit tests and gate green; no dump captured on hardware yet, so the type 3 layout is still unknown. Dumps stay local (*.teldump git-ignored).
+
+### Files
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DatagramDump.kt
+- app/src/desktopMain/kotlin/com/mklhc/app/desktop/DesktopKartRuntime.kt
+- core/data/src/commonMain/kotlin/com/mklhc/core/data/session/KartSessionRepository.kt
+- core/kart-protocol/src/commonMain/kotlin/com/mklhc/core/kart_protocol/telemetry/TelemetryDecoder.kt

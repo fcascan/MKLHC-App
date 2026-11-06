@@ -160,6 +160,10 @@ import kotlin.time.TimeSource
  *   reassembler sees it (the desktop app's raw video dump); null for none. It runs on [scope], so it must
  *   return quickly; it must not keep or change the array. A failure it throws is logged (the first one per
  *   video loop) and does not reach the session.
+ * @param telemetryDatagramTap the same hook for the telemetry port: handed every telemetry datagram as received,
+ *   type octet included, before the decoder sees it (the desktop app's raw telemetry dump); null for none. Same rules
+ *   as [videoDatagramTap]: it runs on [scope], must return quickly, must not keep or change the array, and a failure is
+ *   logged once per telemetry loop and does not reach the session.
  * @param log where the session logs; injected by tests that check what it logs.
  */
 class KartSessionRepository(
@@ -171,6 +175,7 @@ class KartSessionRepository(
     private val config: SessionConfig = SessionConfig(),
     private val timeSource: TimeSource = TimeSource.Monotonic,
     private val videoDatagramTap: ((ByteArray) -> Unit)? = null,
+    private val telemetryDatagramTap: ((ByteArray) -> Unit)? = null,
     private val log: Logger = Logger.withTag(TAG),
 ) : KartSession {
 
@@ -810,15 +815,29 @@ class KartSessionRepository(
 
     private suspend fun telemetryLoop(udp: UdpEndpoint) {
         val decoder = TelemetryDecoder()
+        var tapFailures = 0
+        var typeThreeSeen = false
         try {
             while (true) {
                 val datagram = udp.receive()
+                telemetryDatagramTap?.let { tap ->
+                    try {
+                        tap(datagram.payload)
+                    } catch (failure: Exception) {
+                        // Logged once per telemetry loop: a tap that keeps failing must not flood the log at the telemetry rate.
+                        if (tapFailures++ == 0) log.e(failure) { "telemetryLoop(): the telemetry datagram tap failed -> message=${failure.message}" }
+                    }
+                }
                 val value = decoder.decode(datagram.payload)
                 _telemetry.value = value
                 when (value) {
                     is Telemetry.BatteryStatus -> _battery.value = value
                     is Telemetry.Imu -> _imu.emit(value)
-                    is Telemetry.Unknown -> Unit
+                    is Telemetry.Unknown -> if (value.type == TelemetryDecoder.TYPE_MOTION_FEEDBACK && !typeThreeSeen) {
+                        // Once per telemetry loop: the kart sends it about 30 times a second and nothing decodes it yet.
+                        typeThreeSeen = true
+                        log.i { "telemetryLoop(): type 3 telemetry is arriving, not decoded (one line per session) -> size=${value.raw.size}" }
+                    }
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -839,7 +858,7 @@ class KartSessionRepository(
                         tap(datagram.payload)
                     } catch (failure: Exception) {
                         // Logged once per video loop: a tap that keeps failing must not flood the log at the video rate.
-                        if (tapFailures++ == 0) log.w { "videoLoop(): the video datagram tap failed -> message=${failure.message}" }
+                        if (tapFailures++ == 0) log.e(failure) { "videoLoop(): the video datagram tap failed -> message=${failure.message}" }
                     }
                 }
                 for (frame in reassembler.feed(datagram.payload)) {

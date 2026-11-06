@@ -49,6 +49,8 @@ spike-*-qr.svg
 
 # Raw video datagram dumps of the desktop app (MKLHC_VIDEO_DUMP; they hold the camera's picture)
 *.viddump
+# Raw telemetry datagram dumps of the desktop app (MKLHC_TELEMETRY_DUMP; they hold the kart's recorded motion)
+*.teldump
 
 # MobiAI generated code graph (regenerable; brain/ is kept on purpose)
 .mobiai/graph/

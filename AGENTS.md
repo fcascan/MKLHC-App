@@ -185,8 +185,8 @@ regenerated with `mobiai graph init`, never edited.
 - Never name the kart's manufacturer, console or game anywhere (code, docs, commits, UI, Brain); say "the kart".
 - Never log or print seeds, PSKs, keys, the master secret, tokens or device identities. Never paste a pairing payload
   into an online service.
-- Real captures (`spike-captures/`, `*.viddump`, `*.pcap`) hold decrypted traffic or the camera picture: they stay
-  local and never go into the repository or a test.
+- Real captures (`spike-captures/`, `*.viddump`, `*.teldump`, `*.pcap`) hold decrypted traffic, the camera picture or
+  the kart's recorded motion: they stay local and never go into the repository or a test.
 - Replies to the author are in Spanish; code, comments, commit messages, Brain entries and repository docs are in
   English.
 - On Windows, commands handed to the author are PowerShell 5.1, complete and runnable from any folder:

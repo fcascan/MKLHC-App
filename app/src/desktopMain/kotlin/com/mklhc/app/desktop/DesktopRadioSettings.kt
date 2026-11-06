@@ -9,7 +9,7 @@ import java.nio.file.InvalidPathException
 import java.nio.file.Path
 
 /*
- * How the desktop app is configured: demo or radio, the radiod executable and the data directory.
+ * How the desktop app is configured: demo or radio, the radiod executable, the data directory and the diagnostic dumps.
  *
  * Original code. The radiod candidate list and its lookup moved here from the radio hardware spike
  * (app/src/desktopMain/kotlin/com/mklhc/app/spike/SpikeSession.kt), which now uses them from here; the default data
@@ -34,7 +34,9 @@ import java.nio.file.Path
  *   `~/Library/Application Support/MKLHC` on macOS, `$XDG_CONFIG_HOME/MKLHC` or `~/.config/MKLHC` elsewhere.
  * - `MKLHC_DEMO=1`, or the `--demo` program argument: the scripted demo, with no radio and no kart.
  * - `MKLHC_VIDEO_DUMP`: a folder to dump the kart's raw video datagrams into, one file per run (see
- *   [VideoDatagramDump]); unset by default, which dumps nothing. A diagnostic for studying the video stream.
+ *   [DatagramDump]); unset by default, which dumps nothing. A diagnostic for studying the video stream.
+ * - `MKLHC_TELEMETRY_DUMP`: the same for the telemetry datagrams, in their own file; unset by default. A diagnostic for
+ *   studying the telemetry records the app does not decode yet. It may name the same folder as the video dump.
  *
  * A variable set to a blank value counts as unset. A path in double quotes is taken without them, since cmd's
  * `set MKLHC_RADIOD="C:\Program Files\radiod.exe"` keeps the quotes in the value. A value that cannot be used (a path
@@ -46,12 +48,14 @@ import java.nio.file.Path
  * @property radiodExecutable the absolute path of the radiod executable (it may not exist).
  * @property dataDirectory the absolute directory the pairing file lives in.
  * @property videoDumpDirectory the absolute folder the raw video datagrams are dumped into, or null for no dump.
+ * @property telemetryDumpDirectory the absolute folder the raw telemetry datagrams are dumped into, or null for no dump.
  */
 data class DesktopRadioSettings(
     val demo: Boolean,
     val radiodExecutable: Path,
     val dataDirectory: Path,
     val videoDumpDirectory: Path? = null,
+    val telemetryDumpDirectory: Path? = null,
 ) {
     /** The pairing file inside [dataDirectory]. */
     val pairingStorePath: Path get() = dataDirectory.resolve(PAIRING_STORE_FILE_NAME)
@@ -76,10 +80,10 @@ data class DesktopRadioSettings(
          * Builds the settings from the given environment, system properties and program arguments; nothing else is
          * read except whether the radiod candidates exist, through [isRegularFile].
          *
-         * Business logic: see the class. Relative paths in `MKLHC_RADIOD` and `MKLHC_DATA_DIR` are taken against the
-         * working directory (`user.dir`), and the radiod candidates are looked for there too. So is a default data
-         * directory that comes out relative (from a relative `APPDATA`, `XDG_CONFIG_HOME` or `user.home`), so the data
-         * directory is always absolute.
+         * Business logic: see the class. Relative paths in `MKLHC_RADIOD`, `MKLHC_DATA_DIR` and the dump variables are
+         * taken against the working directory (`user.dir`), and the radiod candidates are looked for there too. So is a
+         * default data directory that comes out relative (from a relative `APPDATA`, `XDG_CONFIG_HOME` or `user.home`),
+         * so the data directory is always absolute.
          *
          * @param env the environment variables (on Windows, `System.getenv()` looks names up case-insensitively).
          * @param systemProperties at least `os.name`, `user.home` and `user.dir`.
@@ -109,11 +113,13 @@ data class DesktopRadioSettings(
                     ?: defaultDataDirectory(osName, systemProperties[PROPERTY_USER_HOME].orEmpty(), env),
             )
             val videoDump = env.pathValueOf(ENV_VIDEO_DUMP)?.let { workingDirectory.resolve(pathOf(it, ENV_VIDEO_DUMP)) }
+            val telemetryDump = env.pathValueOf(ENV_TELEMETRY_DUMP)?.let { workingDirectory.resolve(pathOf(it, ENV_TELEMETRY_DUMP)) }
             return DesktopRadioSettings(
                 demo = demo,
                 radiodExecutable = radiod.normalize(),
                 dataDirectory = dataDirectory.normalize(),
                 videoDumpDirectory = videoDump?.normalize(),
+                telemetryDumpDirectory = telemetryDump?.normalize(),
             )
         }
 
@@ -182,6 +188,9 @@ data class DesktopRadioSettings(
 
         /** The environment variable with the folder the raw video datagrams are dumped into. */
         const val ENV_VIDEO_DUMP = "MKLHC_VIDEO_DUMP"
+
+        /** The environment variable with the folder the raw telemetry datagrams are dumped into. */
+        const val ENV_TELEMETRY_DUMP = "MKLHC_TELEMETRY_DUMP"
 
         /** The program argument that selects the demo. */
         const val ARG_DEMO = "--demo"

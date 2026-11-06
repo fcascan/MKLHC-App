@@ -11,8 +11,8 @@ import co.touchlab.kermit.Logger
  * Type 1 is the battery status (the reference handler requires a 0x1f-octet payload and reads the cable
  * bit from octet 0 and the battery bars from octet 3); type 2 is the IMU packet (see [ImuDecoder]); type
  * 3 is not specified yet (the wiki calls it "motion feedback", the reference ignores it), so it is kept
- * as [Telemetry.Unknown]; every other type is reported as [Telemetry.Unknown] with a warning, as the
- * reference does.
+ * as [Telemetry.Unknown] without a log line (the kart sends one about 30 times a second; the session logs
+ * the first one); every other type is reported as [Telemetry.Unknown] with a warning, as the reference does.
  *
  * The decoder never throws on what the kart sends, since one malformed datagram must not stop the
  * stream: an empty datagram, a type-1 or type-2 payload too short to read, and any other type all come
@@ -46,10 +46,8 @@ class TelemetryDecoder(
         return when (type) {
             TYPE_BATTERY_STATUS -> decodeBatteryStatus(payload) ?: Telemetry.Unknown(type, payload)
             TYPE_IMU -> ImuDecoder.decode(payload, log) ?: Telemetry.Unknown(type, payload)
-            TYPE_MOTION_FEEDBACK -> {
-                log.d { "decode(): type 3 telemetry is not specified yet -> size=${payload.size}" }
-                Telemetry.Unknown(type, payload)
-            }
+            // Not logged here: it arrives about 30 times a second, so a line per datagram would drown the log.
+            TYPE_MOTION_FEEDBACK -> Telemetry.Unknown(type, payload)
             else -> {
                 log.w { "decode(): unknown telemetry type -> type=0x${type.toString(16).padStart(2, '0')} size=${payload.size}" }
                 Telemetry.Unknown(type, payload)

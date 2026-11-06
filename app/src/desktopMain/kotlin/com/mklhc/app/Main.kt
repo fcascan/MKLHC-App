@@ -70,7 +70,8 @@ fun main(args: Array<String>) {
     }
     log.i {
         "main(): starting -> mode=radio radiod=${settings.radiodExecutable} " +
-            "dataDirectory=${settings.dataDirectory} videoDump=${settings.videoDumpDirectory ?: "off"}"
+            "dataDirectory=${settings.dataDirectory} videoDump=${settings.videoDumpDirectory ?: "off"} " +
+            "telemetryDump=${settings.telemetryDumpDirectory ?: "off"}"
     }
     val dataDirectory = lockDataDirectoryOrExit(settings, log)
     // After the lock, so two instances never write the same folder; the lines logged before it stay in the terminal only.

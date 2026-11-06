@@ -35,7 +35,6 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
@@ -61,8 +60,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   access point over the link, the pairing store in the data directory, the USB adapter repository ([adapters]), the
  *   radio unit and the [KartSessionRepository] are built on it. The app creates and locks the data
  *   directory before building the runtime (see [DesktopDataDirectory]), so one runtime at a time uses it. When
- *   [DesktopRadioSettings.videoDumpDirectory] is set, a [VideoDatagramDump] is opened there and the session hands it
- *   every video datagram; a folder that cannot be used is logged at error and the app runs without the dump.
+ *   [DesktopRadioSettings.videoDumpDirectory] or [DesktopRadioSettings.telemetryDumpDirectory] is set, a [DatagramDump]
+ *   of that stream is opened there and the session hands it every datagram of that port; a folder that cannot be used
+ *   is logged at error, naming its variable, and the app runs without that dump.
  * - [adapters] lists the USB devices radiod sees (a scan when radiod connects, then every 2 s while the radio is down)
  *   and resolves the user's choice (automatic by default, persisted in the pairing file). The adapter is "ready" while
  *   radiod is connected and an adapter resolves, and "absent" otherwise, so the UI shows the no-adapter state until
@@ -79,7 +79,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   radio down and exits on the end of its connection exactly as on SHUTDOWN (radiod's main.cpp), so a radiod the
  *   session never used exits at once too, instead of being waited for and killed. It then waits briefly for the
  *   supervisor to see radiod exit and stops it before its restart backoff can launch radiod again, cancels everything
- *   this class started, releases the pairing file, removes the socket and its directory, and closes the video dump.
+ *   this class started, releases the pairing file, removes the socket and its directory, and closes the dumps.
  *
  * Threading: everything that touches the access point, the network stack, the adapter scans or the session repository
  * runs on the runtime's dispatcher, `Dispatchers.Default.limitedParallelism(1)`, as those classes require: one task at
@@ -90,7 +90,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * never logged. The pairing file holds the master secret in the clear, in the data directory (see
  * [DataStorePairingStore]), which the app creates readable by its owner only on macOS and Linux.
  *
- * @param settings the radiod executable, the data directory and the video dump folder.
+ * @param settings the radiod executable, the data directory and the dump folders.
  * @param launcher how radiod is started; replaceable so a test can run a fake radiod in-process.
  * @param crypto the crypto provider for the token, the identity, the keys and the RCD handshake.
  * @param clock Unix time in seconds, for the session's timestamps.
@@ -142,8 +142,14 @@ class DesktopKartRuntime(
         if (connected && overview.resolution is AdapterResolution.Use) AdapterState.READY else AdapterState.ABSENT
     }.stateIn(scope, SharingStarted.Eagerly, AdapterState.ABSENT)
 
-    // Opened with the runtime when MKLHC_VIDEO_DUMP names a folder; one that cannot be used leaves the dump off.
-    private val videoDump: VideoDatagramDump? = settings.videoDumpDirectory?.let(::openVideoDumpOrNull)
+    // Opened with the runtime when MKLHC_VIDEO_DUMP / MKLHC_TELEMETRY_DUMP names a folder; one that cannot be used leaves
+    // that dump off.
+    private val videoDump: DatagramDump? = settings.videoDumpDirectory?.let { directory ->
+        openDatagramDumpOrNull(DatagramDump.Stream.VIDEO, directory, DesktopRadioSettings.ENV_VIDEO_DUMP)
+    }
+    private val telemetryDump: DatagramDump? = settings.telemetryDumpDirectory?.let { directory ->
+        openDatagramDumpOrNull(DatagramDump.Stream.TELEMETRY, directory, DesktopRadioSettings.ENV_TELEMETRY_DUMP)
+    }
 
     private val repository = KartSessionRepository(
         radioAp = RadioKartRadioAp(
@@ -165,6 +171,7 @@ class DesktopKartRuntime(
         scope = scope,
         clock = clock,
         videoDatagramTap = videoDump?.let { dump -> dump::write },
+        telemetryDatagramTap = telemetryDump?.let { dump -> dump::write },
     )
 
     /** The session the UI binds: the real one, with its commands moved onto the runtime's dispatcher. */
@@ -253,16 +260,21 @@ class DesktopKartRuntime(
             Files.deleteIfExists(socketDirectory)
         }
         videoDump?.close()
+        telemetryDump?.close()
         log.i { "shutdown(): radio runtime shut down" }
     }
 
-    /** Opens the video dump in [directory], or logs why it cannot and returns null so the app runs without it. */
-    private fun openVideoDumpOrNull(directory: Path): VideoDatagramDump? = try {
-        VideoDatagramDump.open(directory)
-    } catch (failure: IOException) {
-        log.e {
-            "openVideoDumpOrNull(): the video dump cannot be opened, running without it -> directory=$directory " +
-                "message=${failure.message} (set ${DesktopRadioSettings.ENV_VIDEO_DUMP} to a folder you can write, or unset it)"
+    /**
+     * Opens the dump of [stream] in [directory], or logs why it cannot (naming [variable], the setting that chose the
+     * folder) and returns null so the app runs without it.
+     */
+    private fun openDatagramDumpOrNull(stream: DatagramDump.Stream, directory: Path, variable: String): DatagramDump? = try {
+        DatagramDump.open(stream, directory)
+    } catch (failure: Exception) {
+        // Any failure, not only an IOException: the runtime must still come up, and the other dump must not be left open.
+        log.e(failure) {
+            "openDatagramDumpOrNull(): the ${stream.label} dump cannot be opened, running without it -> directory=$directory " +
+                "message=${failure.message} (set $variable to a folder you can write, or unset it)"
         }
         null
     }

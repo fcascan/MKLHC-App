@@ -92,6 +92,7 @@ class KartSessionRepositoryTest {
         radioSeenByRepo: (FakeKartRadioAp) -> KartRadioAp = { it },
         kartServicesLateBy: Duration? = null,
         videoDatagramTap: ((ByteArray) -> Unit)? = null,
+        telemetryDatagramTap: ((ByteArray) -> Unit)? = null,
         log: Logger = Logger.withTag("KartSessionRepository"),
     ): Harness {
         val radio = FakeKartRadioAp()
@@ -106,6 +107,7 @@ class KartSessionRepositoryTest {
             clock = fixedClock,
             timeSource = testScheduler.timeSource,
             videoDatagramTap = videoDatagramTap,
+            telemetryDatagramTap = telemetryDatagramTap,
             log = log,
         )
         val kart = FakeKart(radio, masterSecret(), scope, crypto, servicesLateBy = kartServicesLateBy)
@@ -405,6 +407,82 @@ class KartSessionRepositoryTest {
         awaitCondition { frames.size == 2 }
         assertEquals(2, tapCalls, "the tap is still called after it failed")
         assertEquals(LinkState.Driving, h.repo.linkState.value)
+    }
+
+    @Test
+    fun everyTelemetryDatagramReachesTheTapAsReceivedBeforeDecoding() = runTest {
+        val tapped = ArrayList<ByteArray>()
+        val h = harness(telemetryDatagramTap = { tapped += it.copyOf() })
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        val battery = batteryDatagram(bars = 2)
+        val typeThree = ByteArray(1 + 87) { (it * 7).toByte() }.also { it[0] = 3 } // not decoded, still tapped
+        val unknownType = byteArrayOf(0x7f, 1, 2)
+        h.kart.sendTelemetry(battery)
+        h.kart.sendTelemetry(typeThree)
+        h.kart.sendTelemetry(unknownType)
+
+        awaitCondition { tapped.size == 3 }
+        assertContentEquals(battery, tapped[0])
+        assertContentEquals(typeThree, tapped[1])
+        assertContentEquals(unknownType, tapped[2])
+    }
+
+    @Test
+    fun aTelemetryTapThatThrowsNeitherStopsTheTelemetryNorReachesTheSession() = runTest {
+        var tapCalls = 0
+        val logs = CapturingLogWriter()
+        val h = harness(
+            telemetryDatagramTap = {
+                tapCalls++
+                error("disk full")
+            },
+            log = capturingLogger(logs, "KartSessionRepository"),
+        )
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        h.kart.sendTelemetry(batteryDatagram(bars = 1))
+        h.kart.sendTelemetry(batteryDatagram(bars = 4))
+
+        val battery = withTimeout(5_000) {
+            h.repo.telemetry.first { it is Telemetry.BatteryStatus && it.batteryBars == 4 }
+        } as Telemetry.BatteryStatus
+        assertEquals(4, battery.batteryBars, "the telemetry after a failed tap is still decoded")
+        assertEquals(2, tapCalls, "the tap is still called after it failed")
+        assertEquals(LinkState.Driving, h.repo.linkState.value)
+        val tapLines = logs.entries.filter { "datagram tap failed" in it.message }
+        assertEquals(1, tapLines.size, "two failures, one line: ${tapLines.map { it.message }}")
+        assertEquals(Severity.Error, tapLines.single().severity)
+        assertTrue(tapLines.single().message.startsWith("telemetryLoop(): the telemetry datagram tap failed -> message=disk full"))
+    }
+
+    @Test
+    fun theFirstTypeThreeTelemetryRecordIsLoggedOnceNotEveryOne() = runTest {
+        val logs = CapturingLogWriter()
+        val h = harness(log = capturingLogger(logs, "KartSessionRepository"))
+        h.repo.start()
+        h.kart.runGameSession()
+        awaitDriving(h.repo)
+
+        repeat(3) { h.kart.sendTelemetry(ByteArray(1 + 87).also { it[0] = 3 }) }
+        h.kart.sendTelemetry(batteryDatagram(bars = 2)) // sent last, so once it is decoded the type 3 ones were too
+        withTimeout(5_000) { h.repo.telemetry.first { it is Telemetry.BatteryStatus } }
+
+        val typeThreeLines = logs.entries.filter { "type 3 telemetry" in it.message }.map { it.message }
+        assertEquals(
+            listOf("telemetryLoop(): type 3 telemetry is arriving, not decoded (one line per session) -> size=87"),
+            typeThreeLines,
+        )
+    }
+
+    /** A type 1 battery status datagram: the type octet, then the 0x1f-octet payload with [bars] in payload octet 3. */
+    private fun batteryDatagram(bars: Int): ByteArray = ByteArray(1 + 0x1f).also {
+        it[0] = 1
+        it[1 + 3] = bars.toByte()
     }
 
     // ---- pairing ------------------------------------------------------------------------------

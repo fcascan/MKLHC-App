@@ -254,7 +254,7 @@ class DesktopKartRuntimeTest {
         runtime.shutdown()
     }
 
-    // ---- The video dump --------------------------------------------------------------------------------
+    // ---- The datagram dumps ----------------------------------------------------------------------------
 
     @Test
     fun aVideoDumpFolderGetsOneDumpFileThatTheShutdownCloses() = runtimeTest {
@@ -269,22 +269,55 @@ class DesktopKartRuntimeTest {
         val dumps = Files.list(folder).use { files -> files.toList() }
         val dump = dumps.single()
         assertTrue(dump.fileName.toString().matches(Regex("video-\\d{8}-\\d{6}\\.viddump")), "file name: ${dump.fileName}")
-        assertContentEquals(VideoDatagramDump.MAGIC.encodeToByteArray(), Files.readAllBytes(dump), "an empty dump is its magic")
+        assertContentEquals(DatagramDump.Stream.VIDEO.magic.encodeToByteArray(), Files.readAllBytes(dump), "an empty dump is its magic")
         assertTrue(logs.has("close(): video dump closed -> path=$dump datagrams=0"), logs.text())
     }
 
     @Test
-    fun aVideoDumpFolderThatCannotBeUsedIsReportedAndTheRadioStillRuns() = runtimeTest {
+    fun aTelemetryDumpFolderGetsItsOwnDumpFileBesideTheVideoOneAndTheShutdownClosesBoth() = runtimeTest {
+        val logs = LogCapture()
+        val folder = tempDir.resolve("captures")
+        withGlobalLogWriter(logs) {
+            val runtime = runtime(settings().copy(videoDumpDirectory = folder, telemetryDumpDirectory = folder))
+            runtime.session.stop()
+            runtime.shutdown()
+        }
+
+        val dumps = Files.list(folder).use { files -> files.toList() }.sortedBy { it.fileName.toString() }
+        assertEquals(2, dumps.size, "one file per stream: $dumps")
+        val (telemetry, video) = dumps
+        assertTrue(telemetry.fileName.toString().matches(Regex("telemetry-\\d{8}-\\d{6}\\.teldump")), "file name: ${telemetry.fileName}")
+        assertTrue(video.fileName.toString().matches(Regex("video-\\d{8}-\\d{6}\\.viddump")), "file name: ${video.fileName}")
+        assertContentEquals(DatagramDump.Stream.TELEMETRY.magic.encodeToByteArray(), Files.readAllBytes(telemetry))
+        assertTrue(logs.has("close(): telemetry dump closed -> path=$telemetry datagrams=0"), logs.text())
+        assertTrue(logs.has("close(): video dump closed -> path=$video datagrams=0"), logs.text())
+    }
+
+    @Test
+    fun aDumpFolderThatCannotBeUsedIsReportedNamingItsVariableAndTheRadioStillRuns() = runtimeTest {
         val logs = LogCapture()
         // A regular file in the way: the folder cannot be created under it.
         val blocked = Files.createFile(tempDir.resolve("not-a-folder")).resolve("captures")
-        val runtime = runtime(settings().copy(videoDumpDirectory = blocked), log = logs.logger())
+        val runtime = runtime(
+            settings().copy(videoDumpDirectory = blocked, telemetryDumpDirectory = blocked),
+            log = logs.logger(),
+        )
 
         runtime.start()
         runtime.session.start()
 
-        assertTrue(logs.has("ERROR: openVideoDumpOrNull(): the video dump cannot be opened, running without it"), logs.text())
-        assertTrue(logs.has("MKLHC_VIDEO_DUMP"), logs.text())
+        val lines = logs.text().lines()
+        assertTrue(
+            lines.any { "ERROR: openDatagramDumpOrNull(): the video dump cannot be opened, running without it" in it && "set MKLHC_VIDEO_DUMP " in it },
+            logs.text(),
+        )
+        assertTrue(
+            lines.any {
+                "ERROR: openDatagramDumpOrNull(): the telemetry dump cannot be opened, running without it" in it &&
+                    "set MKLHC_TELEMETRY_DUMP " in it
+            },
+            logs.text(),
+        )
         launcher.awaitProcess(0).awaitMessages<RadioMessage.StartBeacon>(1)
         awaitLinkState(runtime, LinkState.Beaconing(KartNetworkKind.GAME))
         runtime.session.stop()
